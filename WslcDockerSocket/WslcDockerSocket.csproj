@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <PackageId>wslc-docker-socket</PackageId>
+    <TargetFramework>net10.0-windows10.0.19041</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="WslcDockerSocket.Tests" />
+
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
+    <PackageReference Include="Microsoft.WSL.Containers" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project>
+  <PropertyGroup>
+    <Product>wslc-docker-socket</Product>
+    <Authors>pengweiqhca</Authors>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <DebugType>embedded</DebugType>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <Deterministic>true</Deterministic>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <WindowsSdkPackageVersion>10.0.26100.80</WindowsSdkPackageVersion>
+
+    <NoWarn>CS1591;NU1507</NoWarn>
+  </PropertyGroup>
+</Project>
