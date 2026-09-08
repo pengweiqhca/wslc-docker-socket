@@ -34,7 +34,7 @@ TCP listens only on `127.0.0.1`. Do not expose or forward that port to an untrus
 Point Testcontainers/Docker.DotNet at the named pipe, for example:
 
 ```pwsh
-$env:DOCKER_HOST = 'npipe:////./pipe/wslc-docker-socket'
+$env:DOCKER_HOST = 'npipe://./pipe/wslc-docker-socket'
 $env:TESTCONTAINERS_RYUK_DISABLED = 'true'
 ```
 
@@ -59,7 +59,7 @@ The service returns a Docker-style `501 Not Implemented` for features it cannot 
 
 - bind/volume/tmpfs/Docker-socket mounts and archive copy;
 - custom networks, non-default network modes, and network creation/deletion;
-- TTY containers, attach stdin, and `logs?follow=true`;
+- TTY containers and attach stdin;
 - `HostConfig.AutoRemove` (the adapter keeps lifecycle state to implement Docker inspect/log/wait semantics);
 - multiple host bindings for one container port, host-IP-specific/IPv6 bindings, and port protocols other than TCP/UDP;
 - username/password registry authentication (WSLC identity tokens are supported).
@@ -77,6 +77,23 @@ dotnet WslcDockerSocket.Tests/bin/Release/net10.0-windows10.0.19041/WslcDockerSo
 ```
 
 The unit/HTTP contract suite does not require WSLC. A separate, manually run smoke verification should pull an image and exercise create/start/inspect/logs/exec/delete against a real WSLC installation.
+
+### RocketMQ Testcontainers E2E
+
+`RocketMqTestcontainersE2eTest` uses the `apache/rocketmq:5.3.3` NameServer + Broker + Proxy startup script, a randomly selected valid gRPC port, the proxy startup log wait, and the `mqadmin clusterList` readiness probe. It is deliberately gated to avoid starting a real container in normal unit-test runs. Start the adapter in one terminal, then run the test with both required settings in another:
+
+```pwsh
+# Terminal 1
+dotnet run --project WslcDockerSocket/WslcDockerSocket.csproj --configuration Release
+
+# Terminal 2
+$env:DOCKER_HOST = 'npipe://./pipe/wslc-docker-socket'
+$env:TESTCONTAINERS_RYUK_DISABLED = 'true'
+$env:WSLC_DOCKER_SOCKET_RUN_E2E = 'true'
+dotnet WslcDockerSocket.Tests/bin/Release/net10.0-windows10.0.19041/WslcDockerSocket.Tests.dll -noLogo -parallelMode none -reporter verbose -stopOnFail
+```
+
+The E2E test will not run unless both `WSLC_DOCKER_SOCKET_RUN_E2E=true` and the exact adapter `DOCKER_HOST` value are present. This prevents an accidental run against a locally installed Docker/Rancher engine.
 
 ## License
 

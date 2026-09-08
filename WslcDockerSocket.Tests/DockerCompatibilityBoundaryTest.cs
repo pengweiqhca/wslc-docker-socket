@@ -64,7 +64,7 @@ public sealed class DockerCompatibilityBoundaryTest
     }
 
     [Fact]
-    public void LogsFollowIsRejectedUntilARealFollowStreamExists()
+    public void LogsFollowQueryIsRecognizedForStreamingLogs()
     {
         var query = new Microsoft.AspNetCore.Http.QueryCollection(new Dictionary<string, Microsoft.Extensions.Primitives.StringValues>
         {

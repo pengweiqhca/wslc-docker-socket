@@ -52,6 +52,24 @@ internal sealed class WslcDockerEngine : IDisposable
         };
     }
 
+    public IEnumerable<object> ListImages()
+    {
+        return [.. GetSession().GetImages().Select(image => new
+        {
+            Id = GetImageId(image.Name),
+            ParentId = string.Empty,
+            RepoTags = new[] { image.Name },
+            RepoDigests = Array.Empty<string>(),
+            // The managed WSLC projection does not surface Docker image metadata for these fields.
+            Created = 0L,
+            Size = 0L,
+            VirtualSize = 0L,
+            SharedSize = -1L,
+            Labels = (object?)null,
+            Containers = -1L,
+        })];
+    }
+
     public object InspectImage(string image)
     {
         var reference = DockerImageReference.Parse(image);
@@ -61,7 +79,7 @@ internal sealed class WslcDockerEngine : IDisposable
         {
             // WSLC exposes image names through the managed projection, but not Docker image IDs/config.
             // Keep the adapter identifier stable without presenting it as a WSLC SHA256 digest.
-            Id = "wslc:" + DockerId.From(existing.Name),
+            Id = GetImageId(existing.Name),
             RepoTags = new[] { existing.Name },
             RepoDigests = Array.Empty<string>(),
         };
@@ -220,6 +238,14 @@ internal sealed class WslcDockerEngine : IDisposable
         return exec;
     }
 
+    public void EnsureExecExists(string id)
+    {
+        if (!_execs.ContainsKey(id))
+        {
+            throw new DockerApiException(StatusCodes.Status404NotFound, $"No such exec instance: {id}");
+        }
+    }
+
     public Task<IReadOnlyList<Streaming.DockerOutputFrame>> StartExecAsync(string id, CancellationToken ct)
     {
         if (!_execs.TryGetValue(id, out var exec))
@@ -300,6 +326,8 @@ internal sealed class WslcDockerEngine : IDisposable
 
     private static DockerApiException NoSuchImage(string image) => new(StatusCodes.Status404NotFound,
         $"No such image: {image}");
+
+    private static string GetImageId(string imageName) => "wslc:" + DockerId.From(imageName);
 
     private static string? DecodeRegistryAuth(string registryAuth)
     {

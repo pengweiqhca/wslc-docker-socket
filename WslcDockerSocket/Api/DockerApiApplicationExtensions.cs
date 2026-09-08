@@ -48,6 +48,7 @@ internal static class DockerApiApplicationExtensions
         MapGet(app, "/version", () => Results.Json(WslcDockerEngine.GetVersion()));
         MapGet(app, "/info", (WslcDockerEngine engine) => Results.Json(engine.GetInfo()));
 
+        MapGet(app, "/images/json", (WslcDockerEngine engine) => Results.Json(engine.ListImages()));
         MapGet(app, "/images/{image}/json", (string image, WslcDockerEngine engine) =>
             Results.Json(engine.InspectImage(image)));
         MapPost(app, "/images/create", PullImageAsync);
@@ -124,17 +125,28 @@ internal static class DockerApiApplicationExtensions
 
     private static async Task WriteLogsAsync(string id, HttpContext context, WslcDockerEngine engine, CancellationToken ct)
     {
-        if (DockerQuery.ReadBoolean(context.Request.Query, "follow", false))
+        var options = DockerStreamOptions.FromQuery(context.Request.Query);
+        var follow = DockerQuery.ReadBoolean(context.Request.Query, "follow", false);
+        var container = engine.GetContainer(id);
+        if (!follow)
         {
-            throw new DockerApiException(StatusCodes.Status501NotImplemented,
-                "Container logs follow is not supported by the WSLC Docker socket yet.");
+            await DockerStreams.WriteFramesAsync(context.Response,
+                    container.Output.Snapshot(options.IncludeStdout, options.IncludeStderr), ct)
+                .ConfigureAwait(false);
+            return;
         }
 
-        var options = DockerStreamOptions.FromQuery(context.Request.Query);
-        var container = engine.GetContainer(id);
-        await DockerStreams.WriteFramesAsync(context.Response,
-                container.Output.Snapshot(options.IncludeStdout, options.IncludeStderr), ct)
-            .ConfigureAwait(false);
+        using var subscription = container.Output.Subscribe(includeSnapshot: true, options.IncludeStdout,
+            options.IncludeStderr);
+        DockerStreams.ConfigureRawStreamResponse(context.Response);
+        await context.Response.Body.FlushAsync(ct).ConfigureAwait(false);
+        await foreach (var frame in subscription.Reader.ReadAllAsync(ct).ConfigureAwait(false))
+        {
+            await DockerStreams.WriteChunkedFrameAsync(context.Response.Body, frame, ct).ConfigureAwait(false);
+            await context.Response.Body.FlushAsync(ct).ConfigureAwait(false);
+        }
+
+        await DockerStreams.WriteChunkTerminatorAsync(context.Response.Body, ct).ConfigureAwait(false);
     }
 
     private static async Task AttachAsync(string id, HttpContext context, WslcDockerEngine engine, CancellationToken ct)
@@ -156,13 +168,15 @@ internal static class DockerApiApplicationExtensions
         }
 
         using var subscription = container.Output.Subscribe(options.Logs, options.IncludeStdout, options.IncludeStderr);
-        context.Response.StatusCode = StatusCodes.Status200OK;
-        context.Response.ContentType = DockerStreams.ContentType;
+        DockerStreams.ConfigureRawStreamResponse(context.Response);
+        await context.Response.Body.FlushAsync(ct).ConfigureAwait(false);
         await foreach (var frame in subscription.Reader.ReadAllAsync(ct).ConfigureAwait(false))
         {
-            await DockerStreams.WriteFrameAsync(context.Response.Body, frame, ct).ConfigureAwait(false);
+            await DockerStreams.WriteChunkedFrameAsync(context.Response.Body, frame, ct).ConfigureAwait(false);
             await context.Response.Body.FlushAsync(ct).ConfigureAwait(false);
         }
+
+        await DockerStreams.WriteChunkTerminatorAsync(context.Response.Body, ct).ConfigureAwait(false);
     }
 
     private static async Task StartExecAsync(string id, HttpContext context, WslcDockerEngine engine, CancellationToken ct)

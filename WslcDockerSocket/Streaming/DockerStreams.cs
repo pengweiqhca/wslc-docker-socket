@@ -37,14 +37,41 @@ internal static class DockerStreams
         return frames;
     }
 
-    public static async Task WriteFramesAsync(HttpResponse response, IReadOnlyList<DockerOutputFrame> frames, CancellationToken ct)
+    public static void ConfigureRawStreamResponse(HttpResponse response)
     {
         response.StatusCode = StatusCodes.Status200OK;
         response.ContentType = ContentType;
+        // Docker.DotNet's named-pipe transport treats Docker raw-stream content as chunked HTTP.
+        // Kestrel does not apply chunk framing when this header is supplied directly, so this class
+        // writes the framing explicitly before each Docker multiplex frame.
+        response.Headers.TransferEncoding = "chunked";
+    }
+
+    public static async Task WriteFramesAsync(HttpResponse response, IReadOnlyList<DockerOutputFrame> frames, CancellationToken ct)
+    {
+        ConfigureRawStreamResponse(response);
         foreach (var frame in frames)
         {
-            await WriteFrameAsync(response.Body, frame, ct).ConfigureAwait(false);
+            await WriteChunkedFrameAsync(response.Body, frame, ct).ConfigureAwait(false);
         }
+
+        await WriteChunkTerminatorAsync(response.Body, ct).ConfigureAwait(false);
+        await response.Body.FlushAsync(ct).ConfigureAwait(false);
+    }
+
+    public static async Task WriteChunkedFrameAsync(Stream destination, DockerOutputFrame frame, CancellationToken ct)
+    {
+        var length = checked(8 + frame.Data.Length);
+        var header = System.Text.Encoding.ASCII.GetBytes(length.ToString("X", System.Globalization.CultureInfo.InvariantCulture)
+            + "\r\n");
+        await destination.WriteAsync(header, ct).ConfigureAwait(false);
+        await WriteFrameAsync(destination, frame, ct).ConfigureAwait(false);
+        await destination.WriteAsync("\r\n"u8.ToArray(), ct).ConfigureAwait(false);
+    }
+
+    public static async Task WriteChunkTerminatorAsync(Stream destination, CancellationToken ct)
+    {
+        await destination.WriteAsync("0\r\n\r\n"u8.ToArray(), ct).ConfigureAwait(false);
     }
 
     public static async Task WriteFrameAsync(Stream destination, DockerOutputFrame frame, CancellationToken ct)
