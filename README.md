@@ -44,27 +44,57 @@ Ryuk requires mounting the Docker socket into a container. WSLC Docker socket in
 
 Both unversioned paths and `/v{major.minor}/...` paths are accepted for:
 
-`/version` reports the loaded `Microsoft.WSL.Containers` SDK assembly version as the server version. Its Docker API range is an adapter capability declaration, not a Docker daemon/Go/kernel probe. `/info` image counts come from the active WSLC session; container counts are limited to containers created by this adapter instance. WSLC 2.9.9 does not expose Docker daemon metadata, global container enumeration, Docker-network metadata, or a typed full inspect schema, so the adapter does not fabricate those values.
+`/version` reports the loaded `Microsoft.WSL.Containers` SDK assembly version as the server version. Its Docker API range is an adapter capability declaration, not a Docker daemon/Go/kernel probe. `/info` image counts come from the active WSLC session; after catalog discovery is enabled, its container counts come from the current WSLC catalog rather than this process's runtime overlay. WSLC 2.9.9 does not expose Docker daemon metadata, global container enumeration, Docker-network metadata, or a typed full inspect schema, so the adapter does not fabricate those values.
 
 - `/_ping`, `/version`, `/info`
 - image inspect and pull
+- volume list and inspect
+- network list and inspect
 - container create, start, stop, wait, list, inspect, logs, attach, and delete
 - exec create, start, and inspect
 
+### WSLC SDK catalog compatibility boundary
+
+`Microsoft.WSL.Containers` is the primary integration layer for lifecycle operations, events, logs, attach, and exec. However, the currently pinned **2.9.9** SDK exposes operations for a *known* container (`WslcOpenContainer`, `WslcInspectContainer`, and `WslcGetContainerState`), but no public operation that enumerates every container in a WSLC scope. That means a fresh adapter process cannot discover containers created directly with `wslc` or by another Docker API client such as Portainer.
+
+The adapter therefore uses the local `wslc` CLI only as a temporary authoritative catalog boundary:
+
+```pwsh
+wslc list -a --format json
+wslc container inspect <id-or-name> --format json
+```
+
+The CLI supplies global discovery and Docker-shaped inspection data for `/containers/json`, `/containers/{id}/json`, and the container totals in `/info`. It is not used to replace SDK-backed lifecycle and streaming operations. The list response is deliberately parsed as either a JSON array or a single JSON object because the CLI emits the latter when exactly one container exists.
+
+#### Replacing the CLI catalog after an SDK upgrade
+
+When updating `Microsoft.WSL.Containers`, first check whether its **public** session/container APIs can enumerate every container in the default scope and all active named WSLC sessions, without relying on prior IDs or names. If that capability exists, replace `WslcCliContainerCatalog` with an SDK-backed catalog and remove process invocation rather than introducing a second cache.
+
+Before accepting that replacement, validate it against a WSLC installation containing a container created outside this adapter (for example `mongo`):
+
+1. An SDK catalog call returns the full ID, name, image, creation time, and current state for both externally created and adapter-created containers.
+2. `GET /v1.24/containers/json?all=1` contains the external container with the same ID/name/image/state as `wslc list -a --format json`.
+3. `GET /v1.24/containers/<id-prefix>/json` returns HTTP 200 and preserves Docker-compatible inspect data; do not replace the CLI inspect path until the SDK data can be mapped faithfully.
+4. `/v1.24/info` container totals match the SDK catalog result.
+5. Restarting the adapter leaves existing containers intact and continues to discover them; shutting down the adapter must release handles, not terminate the WSLC session or delete workloads.
+6. Run the normal test suite plus the real WSLC smoke check described below.
+
 Container output is emitted as Docker's raw multiplexed stream. Attach honours the `logs`, `stream`, `stdout`, and `stderr` query flags. It is output-only: attach stdin/hijacking is not implemented.
+
+Volume and network list/inspect endpoints query the WSLC CLI for the current authoritative state rather than reporting fabricated empty collections. They are read-only at present: volume/network mutation and mounting semantics remain unsupported until their Docker lifecycle contracts are mapped deliberately.
 
 ## Explicit compatibility limits
 
 The service returns a Docker-style `501 Not Implemented` for features it cannot represent safely, including:
 
 - bind/volume/tmpfs/Docker-socket mounts and archive copy;
-- custom networks, non-default network modes, and network creation/deletion;
+- network creation/deletion/connect/disconnect, non-default network modes, and custom Docker networks;
 - TTY containers and attach stdin;
 - `HostConfig.AutoRemove` (the adapter keeps lifecycle state to implement Docker inspect/log/wait semantics);
 - multiple host bindings for one container port, host-IP-specific/IPv6 bindings, and port protocols other than TCP/UDP;
 - username/password registry authentication (WSLC identity tokens are supported).
 
-Containers created through this service are **session-scoped**: the service performs best-effort deletion of its managed WSLC containers when it stops. Do not use it as a long-lived container supervisor.
+Containers remain WSLC workloads after this service stops. The adapter must release its own handles without deleting containers or terminating a WSLC session, so it can be used as a long-lived container-management endpoint rather than only as a Testcontainers helper.
 
 Exec output is collected before the response is sent and is capped at 16 MiB per stream. This prevents unbounded memory use but means exec start is not yet live streaming. Container attach subscriptions are bounded; slow consumers are disconnected rather than allowing the service to grow memory without bound.
 

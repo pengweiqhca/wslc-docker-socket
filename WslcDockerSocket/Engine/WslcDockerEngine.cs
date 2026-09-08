@@ -11,7 +11,11 @@ using Microsoft.WSL.Containers;
 internal sealed class WslcDockerEngine : IDisposable
 {
     private const string SessionApplicationName = "WslcDockerSocket";
+    // Retains process-local SDK handles and output buffers for adapter-created containers only.
+    // It is not the source of truth for Docker list, inspect, or global container counts.
     private readonly ConcurrentDictionary<string, DockerContainerState> _containers = new(StringComparer.OrdinalIgnoreCase);
+    private readonly WslcCliContainerCatalog _containerCatalog = new(SessionApplicationName);
+    private readonly WslcCliResourceCatalog _resourceCatalog = new(SessionApplicationName);
     private readonly ConcurrentDictionary<string, DockerExecState> _execs = new(StringComparer.OrdinalIgnoreCase);
     private readonly Lock _sessionLock = new();
     private Session? _session;
@@ -31,17 +35,17 @@ internal sealed class WslcDockerEngine : IDisposable
         };
     }
 
-    public object GetInfo()
+    public async Task<object> GetInfoAsync(CancellationToken ct)
     {
-        var containers = _containers.Values.ToArray();
+        var containers = await _containerCatalog.ListAsync(ct).ConfigureAwait(false);
         return new
         {
-            // Container and image counts are scoped to this adapter's active WSLC session.
+            // Container counts come from the global WSLC catalog; image enumeration remains session-scoped.
             ID = SessionApplicationName,
-            Containers = containers.Length,
-            ContainersRunning = containers.Count(container => container.State == "running"),
+            Containers = containers.Count,
+            ContainersRunning = containers.Count(container => container.DockerState == "running"),
             ContainersPaused = 0,
-            ContainersStopped = containers.Count(container => container.State == "exited"),
+            ContainersStopped = containers.Count(container => container.DockerState == "exited"),
             Images = GetSession().GetImages().Count,
             Driver = "wslc",
             OSType = "linux",
@@ -157,6 +161,7 @@ internal sealed class WslcDockerEngine : IDisposable
         var container = new DockerContainerState(id, name, image, request, runtime, portBindings);
         if (!_containers.TryAdd(id, container))
         {
+            container.Delete(force: true);
             container.Dispose();
             throw new DockerApiException(StatusCodes.Status500InternalServerError, "Failed to record the WSLC container.");
         }
@@ -199,21 +204,38 @@ internal sealed class WslcDockerEngine : IDisposable
         container.Dispose();
     }
 
+    // Only routes that require an adapter-owned SDK handle may use the runtime overlay.
     public DockerContainerState GetContainer(string idOrName)
     {
         var container = _containers.Values.FirstOrDefault(candidate => candidate.Matches(idOrName));
         return container ?? throw new DockerApiException(StatusCodes.Status404NotFound, $"No such container: {idOrName}");
     }
 
-    public object InspectContainer(string id) => GetContainer(id).ToInspectResponse();
+    public Task<JsonElement> InspectContainerAsync(string id, CancellationToken ct) => _containerCatalog.InspectAsync(id, ct);
 
-    public IEnumerable<object> ListContainers(IQueryCollection query)
+    public async Task<object> ListVolumesAsync(CancellationToken ct) => new
+    {
+        Volumes = await _resourceCatalog.ListAndInspectAsync("volume", ct).ConfigureAwait(false),
+        Warnings = Array.Empty<string>(),
+    };
+
+    public Task<JsonElement> InspectVolumeAsync(string name, CancellationToken ct) =>
+        _resourceCatalog.InspectAsync("volume", name, ct);
+
+    public Task<IReadOnlyList<JsonElement>> ListNetworksAsync(CancellationToken ct) =>
+        _resourceCatalog.ListAndInspectAsync("network", ct);
+
+    public Task<JsonElement> InspectNetworkAsync(string idOrName, CancellationToken ct) =>
+        _resourceCatalog.InspectAsync("network", idOrName, ct);
+
+    public async Task<IReadOnlyList<object>> ListContainersAsync(IQueryCollection query, CancellationToken ct)
     {
         var includeStopped = string.Equals(query["all"], "1", StringComparison.Ordinal)
                              || string.Equals(query["all"], "true", StringComparison.OrdinalIgnoreCase);
-        return [.. _containers.Values
-            .Where(container => includeStopped || container.State == "running")
-            .Select(container => container.ToListResponse())];
+        var containers = await _containerCatalog.ListAsync(ct).ConfigureAwait(false);
+        return [.. containers
+            .Where(container => includeStopped || container.DockerState == "running")
+            .Select(ToListResponse)];
     }
 
     public DockerExecState CreateExec(string containerId, DockerExecCreateRequest request)
@@ -292,7 +314,7 @@ internal sealed class WslcDockerEngine : IDisposable
         _containers.Clear();
         lock (_sessionLock)
         {
-            _session?.Terminate();
+            // Release this adapter's session handle without terminating a WSLC session or its workloads.
             _session?.Dispose();
             _session = null;
         }
@@ -316,6 +338,30 @@ internal sealed class WslcDockerEngine : IDisposable
             _session = session;
             return session;
         }
+    }
+
+    private static object ToListResponse(WslcCatalogContainer container)
+    {
+        var state = container.DockerState;
+        return new
+        {
+            container.Id,
+            Names = new[] { "/" + container.Name.TrimStart('/') },
+            container.Image,
+            ImageID = GetImageId(container.Image),
+            // WSLC list does not expose these summary fields; avoid reconstructing them from an adapter cache.
+            Command = string.Empty,
+            Created = container.CreatedAt,
+            State = state,
+            Status = state switch
+            {
+                "running" => "Up",
+                "created" => "Created",
+                _ => "Exited",
+            },
+            Labels = new Dictionary<string, string>(),
+            Ports = Array.Empty<object>(),
+        };
     }
 
     private static string GetWslcSdkVersion()

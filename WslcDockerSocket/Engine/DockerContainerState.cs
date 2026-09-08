@@ -235,15 +235,8 @@ internal sealed class DockerContainerState : IDisposable
             return;
         }
 
-        try
-        {
-            Delete(force: true);
-        }
-        catch
-        {
-            // Shutdown and deletion are best-effort; the owning session is terminated afterwards.
-        }
-
+        // Disposal releases this adapter's event subscriptions and handles only. Explicit Docker
+        // deletion remains the responsibility of WslcDockerEngine.DeleteContainer.
         _initProcess.OutputReceived -= OnOutput;
         _initProcess.ErrorReceived -= OnError;
         _initProcess.Exited -= OnExited;

@@ -46,7 +46,8 @@ internal static class DockerApiApplicationExtensions
         app.MapGet("/", () => Results.Text("wslc-docker-socket", "text/plain"));
         MapGet(app, "/_ping", () => Results.Text("OK", "text/plain"));
         MapGet(app, "/version", () => Results.Json(WslcDockerEngine.GetVersion()));
-        MapGet(app, "/info", (WslcDockerEngine engine) => Results.Json(engine.GetInfo()));
+        MapGet(app, "/info", async (WslcDockerEngine engine, CancellationToken ct) =>
+            Results.Json(await engine.GetInfoAsync(ct).ConfigureAwait(false)));
 
         MapGet(app, "/images/json", (WslcDockerEngine engine) => Results.Json(engine.ListImages()));
         MapGet(app, "/images/{image}/json", (string image, WslcDockerEngine engine) =>
@@ -65,10 +66,10 @@ internal static class DockerApiApplicationExtensions
         MapPost(app, "/containers/{id}/stop", (string id, WslcDockerEngine engine) =>
             Results.StatusCode(engine.StopContainer(id) ? StatusCodes.Status204NoContent : StatusCodes.Status304NotModified));
         MapPost(app, "/containers/{id}/wait", WaitForContainerAsync);
-        MapGet(app, "/containers/json", (HttpContext context, WslcDockerEngine engine) =>
-            Results.Json(engine.ListContainers(context.Request.Query)));
-        MapGet(app, "/containers/{id}/json", (string id, WslcDockerEngine engine) =>
-            Results.Json(engine.InspectContainer(id)));
+        MapGet(app, "/containers/json", async (HttpContext context, WslcDockerEngine engine, CancellationToken ct) =>
+            Results.Json(await engine.ListContainersAsync(context.Request.Query, ct).ConfigureAwait(false)));
+        MapGet(app, "/containers/{id}/json", async (string id, WslcDockerEngine engine, CancellationToken ct) =>
+            Results.Json(await engine.InspectContainerAsync(id, ct).ConfigureAwait(false)));
         MapGet(app, "/containers/{id}/logs", WriteLogsAsync);
         MapPost(app, "/containers/{id}/attach", AttachAsync);
 
@@ -88,9 +89,15 @@ internal static class DockerApiApplicationExtensions
             return Results.StatusCode(StatusCodes.Status204NoContent);
         });
 
-        MapGet(app, "/networks", () => Results.Json(Array.Empty<object>()));
-        MapGet(app, "/networks/{id}", (string id) =>
-            DockerResults.Error(StatusCodes.Status404NotFound, $"No such network: {id}"));
+        MapGet(app, "/volumes", async (WslcDockerEngine engine, CancellationToken ct) =>
+            Results.Json(await engine.ListVolumesAsync(ct).ConfigureAwait(false)));
+        MapGet(app, "/volumes/{name}", async (string name, WslcDockerEngine engine, CancellationToken ct) =>
+            Results.Json(await engine.InspectVolumeAsync(name, ct).ConfigureAwait(false)));
+
+        MapGet(app, "/networks", async (WslcDockerEngine engine, CancellationToken ct) =>
+            Results.Json(await engine.ListNetworksAsync(ct).ConfigureAwait(false)));
+        MapGet(app, "/networks/{id}", async (string id, WslcDockerEngine engine, CancellationToken ct) =>
+            Results.Json(await engine.InspectNetworkAsync(id, ct).ConfigureAwait(false)));
         MapPost(app, "/networks/create", () => DockerResults.Error(StatusCodes.Status501NotImplemented,
             "Custom Docker networks are not supported by the WSLC Docker socket yet."));
         MapDelete(app, "/networks/{id}", (string id) =>
