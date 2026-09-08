@@ -244,12 +244,12 @@ internal static class DockerProcessOutput
     public static async Task<byte[]> ReadAsync(WslcProcess process, ProcessOutputHandle output, CancellationToken ct)
     {
         using var stream = process.GetOutputStream(output);
-        using var memory = new MemoryStream();
+        await using var memory = new MemoryStream();
         while (true)
         {
-            var buffer = new Windows.Storage.Streams.Buffer(BufferSize);
+            var buffer = new Buffer(BufferSize);
             var operation = stream.ReadAsync(buffer, buffer.Capacity, InputStreamOptions.None);
-            using var registration = ct.Register(operation.Cancel);
+            await using var registration = ct.Register(operation.Cancel);
             IBuffer read;
             try
             {

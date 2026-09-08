@@ -2,10 +2,10 @@ namespace WslcDockerSocket.Tests;
 
 using System.Collections.Generic;
 using Microsoft.AspNetCore.Http;
-using WslcDockerSocket.Api;
-using WslcDockerSocket.Api.Contracts;
-using WslcDockerSocket.Engine;
-using WslcDockerSocket.Streaming;
+using Api;
+using Api.Contracts;
+using Engine;
+using Streaming;
 
 public sealed class DockerCompatibilityBoundaryTest
 {
@@ -66,7 +66,7 @@ public sealed class DockerCompatibilityBoundaryTest
     [Fact]
     public void LogsFollowQueryIsRecognizedForStreamingLogs()
     {
-        var query = new Microsoft.AspNetCore.Http.QueryCollection(new Dictionary<string, Microsoft.Extensions.Primitives.StringValues>
+        var query = new QueryCollection(new Dictionary<string, Microsoft.Extensions.Primitives.StringValues>
         {
             ["follow"] = "true",
         });

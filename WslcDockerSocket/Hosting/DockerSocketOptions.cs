@@ -1,7 +1,5 @@
 namespace WslcDockerSocket.Hosting;
 
-using System.Globalization;
-
 internal sealed class DockerSocketOptions(ushort tcpPort, string namedPipe, bool disableNamedPipe, bool enableTcp)
 {
     public ushort TcpPort { get; } = tcpPort;
@@ -11,8 +9,6 @@ internal sealed class DockerSocketOptions(ushort tcpPort, string namedPipe, bool
     public bool DisableNamedPipe { get; } = disableNamedPipe;
 
     public bool EnableTcp { get; } = enableTcp;
-
-    public string TcpUrl => $"http://127.0.0.1:{TcpPort.ToString(CultureInfo.InvariantCulture)}";
 
     public static DockerSocketOptions From(IConfiguration configuration)
     {

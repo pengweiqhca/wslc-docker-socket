@@ -96,7 +96,7 @@ internal sealed class WslcDockerEngine : IDisposable
             RegistryAuth = DecodeRegistryAuth(registryAuth),
         };
         var operation = GetSession().PullImageAsync(options);
-        using var registration = ct.Register(operation.Cancel);
+        await using var registration = ct.Register(operation.Cancel);
         try
         {
             await operation;
@@ -448,7 +448,7 @@ internal sealed class WslcDockerEngine : IDisposable
 
     private void RemoveExecsForContainer(string containerId)
     {
-        foreach (var (id, exec) in _execs.Where(entry => entry.Value.ContainerId.Equals(containerId, StringComparison.OrdinalIgnoreCase)))
+        foreach (var (id, _) in _execs.Where(entry => entry.Value.ContainerId.Equals(containerId, StringComparison.OrdinalIgnoreCase)))
         {
             _execs.TryRemove(id, out _);
         }

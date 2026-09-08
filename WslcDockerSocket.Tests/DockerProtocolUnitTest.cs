@@ -3,11 +3,11 @@ namespace WslcDockerSocket.Tests;
 using System.Collections.Generic;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
-using WslcDockerSocket.Api;
-using WslcDockerSocket.Api.Contracts;
-using WslcDockerSocket.Engine;
-using WslcDockerSocket.Hosting;
-using WslcDockerSocket.Streaming;
+using Api;
+using Api.Contracts;
+using Engine;
+using Hosting;
+using Streaming;
 
 public sealed class DockerProtocolUnitTest
 {

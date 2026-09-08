@@ -1,12 +1,11 @@
 namespace WslcDockerSocket.Api;
 
-using System.Text;
 using System.Text.Json;
 using Contracts;
 using Engine;
 using Streaming;
 
-internal static class DockerApiApplicationExtensions
+internal static partial class DockerApiApplicationExtensions
 {
     public static IApplicationBuilder UseDockerApiExceptionHandler(this IApplicationBuilder app)
     {
@@ -20,19 +19,15 @@ internal static class DockerApiApplicationExtensions
             catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
             {
             }
-            catch (DockerApiException exception)
-            {
-                await DockerResults.WriteErrorAsync(context, exception.StatusCode, exception.Message,
-                        context.RequestAborted)
-                    .ConfigureAwait(false);
-            }
             catch (Exception exception)
             {
-                context.RequestServices.GetRequiredService<ILoggerFactory>()
-                    .CreateLogger("DockerApi")
-                    .LogError(exception, "Docker API request {Method} {Path} failed.", context.Request.Method,
-                        context.Request.Path);
-                await DockerResults.WriteErrorAsync(context, StatusCodes.Status500InternalServerError,
+                if (exception is not DockerApiException)
+                    context.RequestServices.GetRequiredService<ILoggerFactory>()
+                        .CreateLogger("DockerApi")
+                        .LogDockerApiRequestFailed(context.Request.Method, context.Request.Path, exception);
+
+                await DockerResults.WriteErrorAsync(context,
+                        exception is DockerApiException dae ? dae.StatusCode : StatusCodes.Status500InternalServerError,
                         exception.Message, context.RequestAborted)
                     .ConfigureAwait(false);
             }
@@ -221,6 +216,9 @@ internal static class DockerApiApplicationExtensions
         app.MapMethods(path, ["PATCH"], handler);
         app.MapMethods($"/v{{version:regex(^\\d+\\.\\d+$)}}{path}", ["PATCH"], handler);
     }
+
+    [LoggerMessage(LogLevel.Error, "Docker API request {Method} {Path} failed.")]
+    static partial void LogDockerApiRequestFailed(this ILogger logger, string method, PathString path, Exception exception);
 }
 
 internal readonly record struct DockerStreamOptions(bool Logs, bool Stream, bool IncludeStdout, bool IncludeStderr, bool IncludeStdin)
