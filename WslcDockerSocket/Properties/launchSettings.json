@@ -3,9 +3,10 @@
   "profiles": {
     "http": {
       "commandName": "Project",
-      "applicationUrl": "http://localhost:23750",
       "environmentVariables": {
-        "DOTNET_ENVIRONMENT": "Development"
+        "DOTNET_ENVIRONMENT": "Development",
+        "WSLC_DOCKER_SOCKET_ENABLE_TCP": true,
+        "WSLC_DOCKER_SOCKET_PIPE_NAME": "wslc-docker-socket"
       }
     }
   }
