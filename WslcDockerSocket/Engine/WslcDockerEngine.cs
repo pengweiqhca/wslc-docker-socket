@@ -16,6 +16,7 @@ internal sealed class WslcDockerEngine : IDisposable
     private readonly ConcurrentDictionary<string, DockerContainerState> _containers = new(StringComparer.OrdinalIgnoreCase);
     private readonly WslcCliContainerCatalog _containerCatalog = new(SessionApplicationName);
     private readonly WslcCliResourceCatalog _resourceCatalog = new(SessionApplicationName);
+    private readonly WslRuntimeDiagnosticsProvider _runtimeDiagnostics = new();
     private readonly ConcurrentDictionary<string, DockerExecState> _execs = new(StringComparer.OrdinalIgnoreCase);
     private readonly Lock _sessionLock = new();
     private Session? _session;
@@ -37,7 +38,10 @@ internal sealed class WslcDockerEngine : IDisposable
 
     public async Task<object> GetInfoAsync(CancellationToken ct)
     {
+        // Runtime diagnostics are cached and best-effort, so a missing or stalled WSL probe cannot break /info.
+        var diagnosticsTask = _runtimeDiagnostics.GetAsync();
         var containers = await _containerCatalog.ListAsync(ct).ConfigureAwait(false);
+        var diagnostics = await diagnosticsTask.ConfigureAwait(false);
         return new
         {
             // Container counts come from the global WSLC catalog; image enumeration remains session-scoped.
@@ -51,8 +55,14 @@ internal sealed class WslcDockerEngine : IDisposable
             OSType = "linux",
             Architecture = DockerArchitecture.ToInfoArchitecture(RuntimeInformation.ProcessArchitecture),
             NCPU = Environment.ProcessorCount,
+            MemTotal = diagnostics.MemTotal,
+            KernelVersion = diagnostics.KernelVersion,
+            OperatingSystem = diagnostics.OperatingSystem,
             Name = Environment.MachineName,
-            ServerVersion = GetWslcSdkVersion(),
+            // The WSLC runtime version is a more useful diagnostic than the adapter's SDK assembly version.
+            ServerVersion = string.IsNullOrWhiteSpace(diagnostics.ServerVersion)
+                ? GetWslcSdkVersion()
+                : diagnostics.ServerVersion,
         };
     }
 
@@ -142,7 +152,7 @@ internal sealed class WslcDockerEngine : IDisposable
             EnableGpu = false,
             Privileged = request.HostConfig?.Privileged ?? false,
             NetworkingMode = ContainerNetworkingMode.Bridged,
-            EnableAutoRemove = false,
+            EnableAutoRemove = request.HostConfig?.AutoRemove ?? false,
             InitProcess = initSettings,
             PortMappings = [.. portBindings.Select(binding => binding.ToWslc())],
         };
@@ -415,12 +425,6 @@ internal sealed class WslcDockerEngine : IDisposable
         {
             throw new DockerApiException(StatusCodes.Status501NotImplemented,
                 "TTY containers are not supported by the WSLC Docker socket yet.");
-        }
-
-        if (request.HostConfig?.AutoRemove == true)
-        {
-            throw new DockerApiException(StatusCodes.Status501NotImplemented,
-                "HostConfig.AutoRemove is not supported by the WSLC Docker socket yet.");
         }
 
         if (!string.IsNullOrWhiteSpace(request.HostConfig?.NetworkMode)

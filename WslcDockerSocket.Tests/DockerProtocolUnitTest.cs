@@ -1,13 +1,14 @@
-namespace WslcDockerSocket.Tests;
-
-using System.Collections.Generic;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
-using Api;
-using Api.Contracts;
-using Engine;
-using Hosting;
-using Streaming;
+using Microsoft.Extensions.Primitives;
+using Microsoft.WSL.Containers;
+using WslcDockerSocket.Api;
+using WslcDockerSocket.Api.Contracts;
+using WslcDockerSocket.Engine;
+using WslcDockerSocket.Hosting;
+using WslcDockerSocket.Streaming;
+
+namespace WslcDockerSocket.Tests;
 
 public sealed class DockerProtocolUnitTest
 {
@@ -58,8 +59,8 @@ public sealed class DockerProtocolUnitTest
 
         var result = DockerPortBinding.ParseRuntimeInspect(inspect);
 
-        Assert.Equal((ushort)18080, result[new DockerPortKey(8080, Microsoft.WSL.Containers.PortProtocol.TCP)]);
-        Assert.Equal((ushort)28080, result[new DockerPortKey(8080, Microsoft.WSL.Containers.PortProtocol.UDP)]);
+        Assert.Equal((ushort)18080, result[new DockerPortKey(8080, PortProtocol.TCP)]);
+        Assert.Equal((ushort)28080, result[new DockerPortKey(8080, PortProtocol.UDP)]);
     }
 
     [Fact]
@@ -84,7 +85,7 @@ public sealed class DockerProtocolUnitTest
     [Fact]
     public void StreamOptionsRespectLogsStreamAndOutputFlags()
     {
-        var options = DockerStreamOptions.FromQuery(new QueryCollection(new Dictionary<string, Microsoft.Extensions.Primitives.StringValues>
+        var options = DockerStreamOptions.FromQuery(new QueryCollection(new Dictionary<string, StringValues>
         {
             ["logs"] = "1",
             ["stream"] = "false",

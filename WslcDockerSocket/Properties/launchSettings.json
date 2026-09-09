@@ -5,7 +5,7 @@
       "commandName": "Project",
       "environmentVariables": {
         "DOTNET_ENVIRONMENT": "Development",
-        "WSLC_DOCKER_SOCKET_ENABLE_TCP": true,
+        "WSLC_DOCKER_SOCKET_ENABLE_TCP": "true",
         "WSLC_DOCKER_SOCKET_PIPE_NAME": "wslc-docker-socket"
       }
     }

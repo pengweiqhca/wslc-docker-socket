@@ -1,7 +1,7 @@
-namespace WslcDockerSocket.Tests;
-
 using System.Runtime.InteropServices;
 using WslcDockerSocket.Engine;
+
+namespace WslcDockerSocket.Tests;
 
 public sealed class DockerArchitectureTest
 {

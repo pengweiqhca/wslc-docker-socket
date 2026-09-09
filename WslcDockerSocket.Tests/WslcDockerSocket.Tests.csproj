@@ -6,13 +6,13 @@
     <OutputType>Exe</OutputType>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
-    <PackageReference Include="Testcontainers" />
+    <PackageReference Include="Testcontainers.Redis" />
+    <PackageReference Include="Xunit.DependencyInjection.AspNetCoreTesting" />
+    <PackageReference Include="Xunit.DependencyInjection.Logging" />
     <PackageReference Include="xunit.runner.visualstudio" />
     <PackageReference Include="xunit.v3" />
-  </ItemGroup>
-  <ItemGroup>
+
     <ProjectReference Include="../WslcDockerSocket/WslcDockerSocket.csproj" />
   </ItemGroup>
 </Project>

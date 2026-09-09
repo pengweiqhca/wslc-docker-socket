@@ -1,32 +1,38 @@
-namespace WslcDockerSocket.Tests;
-
 using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using DotNet.Testcontainers.Builders;
+using Testcontainers.Redis;
 
-[Trait("Category", "E2E")]
-public sealed class RocketMqTestcontainersE2eTest
+namespace WslcDockerSocket.Tests;
+
+public sealed class TestContainersTest
 {
-    private const string EnabledEnvironmentVariable = "WSLC_DOCKER_SOCKET_RUN_E2E";
-    private const string DockerHostEnvironmentVariable = "DOCKER_HOST";
-    private const string ExpectedDockerHost = "npipe://./pipe/wslc-docker-socket";
+    private const string ExpectedDockerHost = "npipe://./pipe/" + Startup.PipeName;
+
+    [Fact]
+    public async Task RedisTest()
+    {
+        await using var redisContainer = new RedisBuilder("redis")
+            .WithDockerEndpoint(ExpectedDockerHost)
+            .WithAutoRemove(true)
+            .WithCleanUp(false)
+            .Build();
+
+        await redisContainer.StartAsync(TestContext.Current.CancellationToken);
+
+        Assert.NotNull(redisContainer.GetConnectionString());
+    }
 
     [Fact]
     public async Task RocketMqProxyStartsThroughTheWslcDockerSocket()
     {
-        if (!string.Equals(Environment.GetEnvironmentVariable(EnabledEnvironmentVariable), "true",
-                StringComparison.OrdinalIgnoreCase)
-            || !string.Equals(Environment.GetEnvironmentVariable(DockerHostEnvironmentVariable), ExpectedDockerHost,
-                StringComparison.OrdinalIgnoreCase))
-        {
-            return;
-        }
-
         var ct = TestContext.Current.CancellationToken;
         var port = GetAvailableTcpPort();
         await using var container = new ContainerBuilder("apache/rocketmq:5.3.3")
             .WithDockerEndpoint(ExpectedDockerHost)
+            .WithAutoRemove(true)
+            .WithCleanUp(false)
             .WithEnvironment("TZ", "Asia/Shanghai")
             .WithEnvironment("JAVA_OPT_EXT", "-server -Xms512m -Xmx512m -Xmn256m")
             .WithExposedPort(port)

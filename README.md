@@ -44,7 +44,7 @@ Ryuk requires mounting the Docker socket into a container. WSLC Docker socket in
 
 Both unversioned paths and `/v{major.minor}/...` paths are accepted for:
 
-`/version` reports the loaded `Microsoft.WSL.Containers` SDK assembly version as the server version. Its Docker API range is an adapter capability declaration, not a Docker daemon/Go/kernel probe. `/info` image counts come from the active WSLC session; after catalog discovery is enabled, its container counts come from the current WSLC catalog rather than this process's runtime overlay. WSLC 2.9.9 does not expose Docker daemon metadata, global container enumeration, Docker-network metadata, or a typed full inspect schema, so the adapter does not fabricate those values.
+`/version` reports the loaded `Microsoft.WSL.Containers` SDK assembly version. Its Docker API range is an adapter capability declaration, not a Docker daemon/Go/kernel probe. `/info` image counts come from the active WSLC session; after catalog discovery is enabled, its container counts come from the current WSLC catalog rather than this process's runtime overlay. For Docker-client diagnostics, `/info` also caches best-effort local probes of `wslc version`, the default WSL distribution's `uname -r`, and `/proc/meminfo`; it reports the Windows host description explicitly qualified as `with WSL Containers`. Failed probes are emitted as an empty string or zero rather than fabricated values. WSLC 2.9.9 does not expose Docker daemon metadata, global container enumeration, Docker-network metadata, or a typed full inspect schema, so the adapter does not fabricate those values.
 
 - `/_ping`, `/version`, `/info`
 - image inspect and pull
@@ -83,6 +83,8 @@ Container output is emitted as Docker's raw multiplexed stream. Attach honours t
 
 Volume and network list/inspect endpoints query the WSLC CLI for the current authoritative state rather than reporting fabricated empty collections. They are read-only at present: volume/network mutation and mounting semantics remain unsupported until their Docker lifecycle contracts are mapped deliberately.
 
+`HostConfig.AutoRemove` maps to WSLC auto-remove. Once its init process exits, WSLC can remove the container promptly, so clients must not require a later Docker inspect; this adapter retains its observed exit code and buffered logs only while the process remains alive.
+
 ## Explicit compatibility limits
 
 The service returns a Docker-style `501 Not Implemented` for features it cannot represent safely, including:
@@ -90,7 +92,6 @@ The service returns a Docker-style `501 Not Implemented` for features it cannot 
 - bind/volume/tmpfs/Docker-socket mounts and archive copy;
 - network creation/deletion/connect/disconnect, non-default network modes, and custom Docker networks;
 - TTY containers and attach stdin;
-- `HostConfig.AutoRemove` (the adapter keeps lifecycle state to implement Docker inspect/log/wait semantics);
 - multiple host bindings for one container port, host-IP-specific/IPv6 bindings, and port protocols other than TCP/UDP;
 - username/password registry authentication (WSLC identity tokens are supported).
 

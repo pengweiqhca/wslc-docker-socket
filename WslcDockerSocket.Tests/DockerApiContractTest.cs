@@ -1,15 +1,11 @@
-namespace WslcDockerSocket.Tests;
-
 using System.Net;
 using System.Net.Http.Json;
-using System.Text.Json;
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Mvc.Testing;
 
-public sealed class DockerApiContractTest(DockerSocketApplicationFactory factory)
-    : IClassFixture<DockerSocketApplicationFactory>
+namespace WslcDockerSocket.Tests;
+
+public sealed class DockerApiContractTest(IHttpClientFactory factory)
 {
-    private readonly HttpClient _client = factory.CreateClient();
+    private readonly HttpClient _client = factory.CreateClient("docker");
 
     [Fact]
     public async Task VersionedPingAndVersionExposeDockerCompatibleValues()
@@ -41,7 +37,6 @@ public sealed class DockerApiContractTest(DockerSocketApplicationFactory factory
 
     [Theory]
     [InlineData("Binds", "Bind mounts")]
-    [InlineData("AutoRemove", "AutoRemove")]
     [InlineData("NetworkMode", "default bridge network")]
     [InlineData("Tty", "TTY containers")]
     public async Task CreateWithUnsupportedOptionFailsFastInsteadOfClaimingSupport(string option, string message)
@@ -50,7 +45,6 @@ public sealed class DockerApiContractTest(DockerSocketApplicationFactory factory
         object body = option switch
         {
             "Binds" => new { Image = "alpine:3.20.3", HostConfig = new { Binds = new[] { "C:/host:/container" } } },
-            "AutoRemove" => new { Image = "alpine:3.20.3", HostConfig = new { AutoRemove = true } },
             "NetworkMode" => new { Image = "alpine:3.20.3", HostConfig = new { NetworkMode = "host" } },
             "Tty" => new { Image = "alpine:3.20.3", Tty = true },
             _ => throw new ArgumentOutOfRangeException(nameof(option), option, null),
@@ -99,16 +93,5 @@ public sealed class DockerApiContractTest(DockerSocketApplicationFactory factory
         using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
         Assert.Contains(expectedMessage, document.RootElement.GetProperty("message").GetString(),
             StringComparison.Ordinal);
-    }
-}
-
-public sealed class DockerSocketApplicationFactory : WebApplicationFactory<Program>
-{
-    protected override void ConfigureWebHost(IWebHostBuilder builder)
-    {
-        builder.UseEnvironment("Testing");
-        builder.UseSetting("WSLC_DOCKER_SOCKET_DISABLE_NAMED_PIPE", "true");
-        builder.UseSetting("WSLC_DOCKER_SOCKET_ENABLE_TCP", "true");
-        builder.UseSetting("WSLC_DOCKER_SOCKET_TCP_PORT", "23751");
     }
 }

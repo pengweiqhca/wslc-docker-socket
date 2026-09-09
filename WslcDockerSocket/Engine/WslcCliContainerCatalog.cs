@@ -3,6 +3,7 @@ namespace WslcDockerSocket.Engine;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Api;
 
@@ -57,14 +58,19 @@ internal sealed class WslcCliContainerCatalog(string adapterSessionName)
         var container = await ResolveAsync(idOrName, ct).ConfigureAwait(false);
         var result = await RunAsync(container.SessionName, ["container", "inspect", container.Id, "--format", "json"], ct)
             .ConfigureAwait(false);
-        using var document = JsonDocument.Parse(result.StandardOutput);
-        if (document.RootElement.ValueKind != JsonValueKind.Array || document.RootElement.GetArrayLength() != 1)
+        var inspect = JsonNode.Parse(result.StandardOutput) as JsonArray;
+        if (inspect is null || inspect.Count != 1 || inspect[0] is not JsonObject inspectObject)
         {
             throw new DockerApiException(StatusCodes.Status500InternalServerError,
                 $"WSLC returned an invalid inspect response for container {container.Id}.");
         }
 
-        return document.RootElement[0].Clone();
+        // WSLC reports bound ports at the top level. Docker clients, including Testcontainers,
+        // read the same map from NetworkSettings.Ports.
+        var networkSettings = inspectObject["NetworkSettings"] as JsonObject ?? new JsonObject();
+        networkSettings["Ports"] ??= inspectObject["Ports"]?.DeepClone() ?? new JsonObject();
+        inspectObject["NetworkSettings"] = networkSettings;
+        return JsonSerializer.SerializeToElement(inspectObject);
     }
 
     private async Task<IReadOnlyList<WslcCatalogContainer>> ListScopeAsync(string? sessionName, bool optional,
@@ -101,26 +107,43 @@ internal sealed class WslcCliContainerCatalog(string adapterSessionName)
             return [];
         }
 
-        using var document = JsonDocument.Parse(result.StandardOutput);
-        var items = document.RootElement.ValueKind switch
+        var lines = result.StandardOutput.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        WslcContainerListItem?[] items;
+        if (lines.Length > 1)
         {
-            JsonValueKind.Array => document.RootElement.EnumerateArray()
-                .Select(element => element.Deserialize<WslcContainerListItem>(JsonOptions))
-                .OfType<WslcContainerListItem>(),
-            JsonValueKind.Object => [document.RootElement.Deserialize<WslcContainerListItem>(JsonOptions)
-                ?? throw new DockerApiException(StatusCodes.Status500InternalServerError,
-                    "WSLC returned an invalid container list response.")],
-            _ => throw new DockerApiException(StatusCodes.Status500InternalServerError,
-                "WSLC returned an invalid container list response."),
-        };
-        return [.. items.Where(container => container is not null && !string.IsNullOrWhiteSpace(container.Id))
+            // WSLC emits newline-delimited JSON objects once a scope contains multiple containers.
+            items = [.. lines.Select(ParseListItem)];
+        }
+        else
+        {
+            using var document = JsonDocument.Parse(result.StandardOutput);
+            items = document.RootElement.ValueKind switch
+            {
+                JsonValueKind.Array => [.. document.RootElement.EnumerateArray()
+                    .Select(element => element.Deserialize<WslcContainerListItem>(JsonOptions))],
+                JsonValueKind.Object => [document.RootElement.Deserialize<WslcContainerListItem>(JsonOptions)],
+                _ => throw new DockerApiException(StatusCodes.Status500InternalServerError,
+                    "WSLC returned an invalid container list response."),
+            };
+        }
+
+        return [.. items.OfType<WslcContainerListItem>().Where(container => !string.IsNullOrWhiteSpace(container.Id))
             .Select(container => new WslcCatalogContainer(
-                container!.Id,
+                container.Id,
                 container.Name,
                 container.Image,
                 container.State,
                 container.CreatedAt,
                 sessionName))];
+    }
+
+    private static WslcContainerListItem? ParseListItem(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        return document.RootElement.ValueKind == JsonValueKind.Object
+            ? document.RootElement.Deserialize<WslcContainerListItem>(JsonOptions)
+            : throw new DockerApiException(StatusCodes.Status500InternalServerError,
+                "WSLC returned an invalid container list response.");
     }
 
     private static async Task<IReadOnlyList<string>> ListSessionNamesAsync(CancellationToken ct)
