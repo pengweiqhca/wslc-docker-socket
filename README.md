@@ -49,7 +49,8 @@ $env:DOCKER_HOST = 'npipe://./pipe/my-pipe-name'
 ## Requirements
 
 - Windows with a working WSLC runtime and `wslc` available on `PATH`.
-- .NET SDK 10.0.100 or newer (pinned by `global.json`, `rollForward: latestMinor`).
+- **To run a published build:** the ASP.NET Core 10 runtime or newer. Release archives are framework-dependent, so they need `Microsoft.AspNetCore.App` installed, not just the base .NET runtime; the app rolls forward across major versions.
+- **To build from source:** .NET SDK 10.0.100 or newer (pinned by `global.json`, `rollForward: latestMinor`).
 - A real WSLC installation for the Testcontainers tests; the unit and HTTP contract tests do not need one.
 
 ---
