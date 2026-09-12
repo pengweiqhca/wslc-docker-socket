@@ -6,6 +6,8 @@
 > WSLC and this adapter are both experimental. Treat this as a local development tool.
 
 > [!NOTE]
+> Verified against **WSLC 2.9.11**. WSLC's CLI output is still changing between releases, so re-verify after upgrading.
+>
 > The service declares Docker API **1.43** (`MinAPIVersion` 1.24) and accepts any `/v{major}.{minor}` prefix, so clients negotiating newer versions (1.44, 1.51, …) still work.
 
 **The design rule:** every endpoint either maps faithfully onto a real WSLC capability, or returns an explicit Docker-style error explaining why it cannot. The adapter never fabricates data or reports a false success. Most of this document is about where that line falls.
@@ -48,7 +50,7 @@ $env:DOCKER_HOST = 'npipe://./pipe/my-pipe-name'
 
 ## Requirements
 
-- Windows with a working WSLC runtime and `wslc` available on `PATH`.
+- Windows with a working WSLC runtime and `wslc` available on `PATH`. Verified against **WSLC 2.9.11** (`wslc version`); WSLC 2.9.10 and newer are the primary target, and the container listing also still reads the pre-2.9.10 output.
 - **To run a published build:** the ASP.NET Core 10 runtime or newer. Release archives are framework-dependent, so they need `Microsoft.AspNetCore.App` installed, not just the base .NET runtime; the app rolls forward across major versions.
 - **To build from source:** .NET SDK 10.0.100 or newer (pinned by `global.json`, `rollForward: latestMinor`).
 - A real WSLC installation for the Testcontainers tests; the unit and HTTP contract tests do not need one.
@@ -132,6 +134,8 @@ Unknown endpoints return Docker's `404` shape with `endpoint not implemented: <m
 ## How it maps onto WSLC
 
 All state comes from the `wslc` CLI in its default, unqualified scope; the adapter never passes `--session`.
+
+**CLI output is a moving target.** WSLC 2.9.10 aligned `wslc container list --format json` with Docker's CLI: `Id` became `ID`, `Name` became `Names`, `State` and `CreatedAt` became text, and IDs are now abbreviated while `container create` and inspect still report the full digest. The list reader accepts both shapes, and identifiers are matched on a prefix in either direction so short and full IDs both resolve. Expect to re-verify against a real installation after every WSLC upgrade; fake-driven tests cannot detect this kind of drift.
 
 **Image sizes and timestamps.** `wslc image list` renders these for humans (`146MB`, `2026-08-25 08:48:50 +0800 GMT+8`), which is lossy and not what Docker clients parse. The adapter therefore issues a single batched `wslc image inspect <id> <id> … --format json` per listing and takes exact byte counts and RFC3339 timestamps from it. If an image is missing from that payload — for example, removed between the two calls — the rendered list values are kept rather than failing the whole listing.
 
