@@ -426,14 +426,50 @@ internal sealed class WslcDockerEngine : IDisposable
             Names = new[] { "/" + container.Name.TrimStart('/') },
             container.Image,
             ImageID = container.Image,
-            Command = string.Empty,
+            Command = ToListCommand(detail),
             Created = container.CreatedAt,
             State = container.DockerState,
-            Status = container.DockerState switch { "running" => "Up", "created" => "Created", _ => "Exited" },
-            Labels = new Dictionary<string, string>(),
+            // WSLC's list reports Docker's own status text; older releases omit it.
+            Status = string.IsNullOrWhiteSpace(container.Status)
+                ? container.DockerState switch { "running" => "Up", "created" => "Created", _ => "Exited" }
+                : container.Status,
+            Labels = ToListLabels(detail),
             Ports = ToListPorts(detail),
             NetworkSettings = new { Networks = ToListNetworks(detail) },
         };
+    }
+
+    /// <summary>
+    /// Reads labels from inspect rather than the listing. WSLC renders list labels as one comma-joined string,
+    /// which cannot be split safely because label values may themselves contain commas.
+    /// </summary>
+    private static JsonElement ToListLabels(JsonElement detail) =>
+        detail.ValueKind == JsonValueKind.Object
+        && detail.TryGetProperty("Labels", out var labels)
+        && labels.ValueKind == JsonValueKind.Object
+            ? labels
+            : EmptyJsonObject;
+
+    /// <summary>Rebuilds the container command, which the listing reports only as truncated display text.</summary>
+    private static string ToListCommand(JsonElement detail)
+    {
+        if (detail.ValueKind != JsonValueKind.Object
+            || !detail.TryGetProperty("Config", out var config)
+            || config.ValueKind != JsonValueKind.Object)
+        {
+            return string.Empty;
+        }
+
+        var parts = new List<string>();
+        foreach (var name in (string[])["Entrypoint", "Cmd"])
+        {
+            if (!config.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.Array) continue;
+            parts.AddRange(value.EnumerateArray()
+                .Where(argument => argument.ValueKind == JsonValueKind.String)
+                .Select(argument => argument.GetString() ?? string.Empty));
+        }
+
+        return string.Join(' ', parts);
     }
 
     /// <summary>Projects the inspected port bindings onto Docker's flat list-response port shape.</summary>

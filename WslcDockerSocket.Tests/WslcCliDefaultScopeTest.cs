@@ -23,6 +23,70 @@ public sealed class WslcCliDefaultScopeTest
     }
 
     [Fact]
+    public async Task ContainerCatalogReadsTheDockerAlignedListShape()
+    {
+        // WSLC 2.9.10 aligned this output with Docker's CLI: ID, Names, and text State/CreatedAt.
+        var runner = new RecordingRunner(new WslcCommandResult(
+            "{\"Command\":\"\\\"docker-entrypoint.s…\\\"\",\"CreatedAt\":\"2026-09-12 20:22:55 +0800 GMT+8\",\"ID\":\"19c58a00a160\","
+            + "\"Image\":\"mysql\",\"Names\":\"mysql\",\"State\":\"exited\",\"Status\":\"Exited (0) 3 minutes ago\"}",
+            string.Empty,
+            0));
+
+        var container = Assert.Single(await new WslcCliContainerCatalog(runner).ListAsync(TestContext.Current.CancellationToken));
+
+        Assert.Equal("19c58a00a160", container.Id);
+        Assert.Equal("mysql", container.Name);
+        Assert.Equal("mysql", container.Image);
+        Assert.Equal("exited", container.DockerState);
+        Assert.Equal("Exited (0) 3 minutes ago", container.Status);
+        Assert.Equal(DateTimeOffset.Parse("2026-09-12T20:22:55+08:00", System.Globalization.CultureInfo.InvariantCulture).ToUnixTimeSeconds(),
+            container.CreatedAt);
+        AssertDefaultScope(runner);
+    }
+
+    [Fact]
+    public async Task ContainerCatalogStillReadsTheNativeNumericListShape()
+    {
+        var runner = new RecordingRunner(new WslcCommandResult(
+            "{\"CreatedAt\":1789215775,\"Id\":\"19c58a00a160\",\"Image\":\"mysql\",\"Name\":\"mysql\",\"State\":2}",
+            string.Empty,
+            0));
+
+        var container = Assert.Single(await new WslcCliContainerCatalog(runner).ListAsync(TestContext.Current.CancellationToken));
+
+        Assert.Equal("19c58a00a160", container.Id);
+        Assert.Equal("mysql", container.Name);
+        Assert.Equal("running", container.DockerState);
+        Assert.Equal(1789215775, container.CreatedAt);
+        AssertDefaultScope(runner);
+    }
+
+    [Fact]
+    public async Task ContainerListReportsLabelsAndCommandFromInspect()
+    {
+        var runner = new RecordingRunner(command => command.SequenceEqual(["container", "list", "-a", "--format", "json"])
+            ? new WslcCommandResult(
+                "{\"CreatedAt\":\"2026-09-12 20:22:55 +0800 GMT+8\",\"ID\":\"19c58a00a160\",\"Image\":\"mysql\",\"Names\":\"mysql\",\"State\":\"running\",\"Status\":\"Up 3 minutes\"}",
+                string.Empty,
+                0)
+            : new WslcCommandResult(
+                "[{\"Id\":\"19c58a00a160\",\"Labels\":{\"com.docker.compose.project\":\"demo\"},"
+                + "\"Config\":{\"Entrypoint\":[\"docker-entrypoint.sh\"],\"Cmd\":[\"mysqld\"]}}]",
+                string.Empty,
+                0));
+        using var engine = new WslcDockerEngine(runner, new WslRuntimeDiagnosticsProvider());
+
+        var listed = Assert.Single(await engine.ListContainersAsync(new QueryCollection(), TestContext.Current.CancellationToken));
+        var container = JsonSerializer.SerializeToElement(listed);
+
+        Assert.Equal("demo", container.GetProperty("Labels").GetProperty("com.docker.compose.project").GetString());
+        Assert.Equal("docker-entrypoint.sh mysqld", container.GetProperty("Command").GetString());
+        Assert.Equal("Up 3 minutes", container.GetProperty("Status").GetString());
+        Assert.Equal("running", container.GetProperty("State").GetString());
+        AssertDefaultScope(runner);
+    }
+
+    [Fact]
     public async Task ContainerListReportsPublishedPortsAndNetworkAddressFromOneBatchedInspect()
     {
         var runner = new RecordingRunner(command => command.SequenceEqual(["container", "list", "-a", "--format", "json"])

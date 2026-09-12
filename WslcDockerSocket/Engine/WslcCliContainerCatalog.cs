@@ -24,38 +24,110 @@ internal sealed class WslcCliContainerCatalog(IWslcCommandRunner runner)
             return [];
         }
 
+        var containers = new List<WslcCatalogContainer>();
         var lines = result.StandardOutput.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        WslcContainerListItem?[] items;
         if (lines.Length > 1)
         {
-            items = [.. lines.Select(ParseListItem)];
+            foreach (var line in lines) AddListItem(containers, ParseObject(line));
         }
         else
         {
             using var document = JsonDocument.Parse(result.StandardOutput);
-            items = document.RootElement.ValueKind switch
+            switch (document.RootElement.ValueKind)
             {
-                JsonValueKind.Array => [.. document.RootElement.EnumerateArray()
-                    .Select(element => element.Deserialize<WslcContainerListItem>(JsonOptions))],
-                JsonValueKind.Object => [document.RootElement.Deserialize<WslcContainerListItem>(JsonOptions)],
-                _ => throw new DockerApiException(StatusCodes.Status500InternalServerError,
-                    "WSLC returned an invalid container list response."),
-            };
+                case JsonValueKind.Array:
+                    foreach (var element in document.RootElement.EnumerateArray()) AddListItem(containers, element);
+                    break;
+                case JsonValueKind.Object:
+                    AddListItem(containers, document.RootElement);
+                    break;
+                default:
+                    throw new DockerApiException(StatusCodes.Status500InternalServerError,
+                        "WSLC returned an invalid container list response.");
+            }
         }
 
-        return [.. items.OfType<WslcContainerListItem>().Where(container => !string.IsNullOrWhiteSpace(container.Id))
-            .Select(container => new WslcCatalogContainer(
-                container.Id,
-                container.Name,
-                container.Image,
-                container.State,
-                container.CreatedAt))];
+        return containers;
+    }
+
+    /// <summary>
+    /// Reads one list entry. WSLC 2.9.10 aligned this output with Docker's CLI: <c>Id</c> became <c>ID</c>,
+    /// <c>Name</c> became <c>Names</c>, and <c>State</c>/<c>CreatedAt</c> became text. Both shapes are accepted so
+    /// the adapter keeps working across WSLC versions.
+    /// </summary>
+    private static void AddListItem(List<WslcCatalogContainer> containers, JsonElement element)
+    {
+        if (element.ValueKind != JsonValueKind.Object) return;
+        var id = ReadString(element, "Id") ?? ReadString(element, "ID");
+        if (string.IsNullOrWhiteSpace(id)) return;
+
+        containers.Add(new WslcCatalogContainer(
+            id,
+            ReadPrimaryName(element),
+            ReadString(element, "Image") ?? string.Empty,
+            ReadDockerState(element),
+            ReadCreatedSeconds(element),
+            ReadString(element, "Status") ?? string.Empty));
+    }
+
+    private static string ReadPrimaryName(JsonElement element)
+    {
+        var name = ReadString(element, "Name") ?? ReadString(element, "Names");
+        if (string.IsNullOrWhiteSpace(name)) return string.Empty;
+        // Docker's list reports every name for a container; the first is its canonical name.
+        var separator = name.IndexOf(',');
+        return (separator < 0 ? name : name[..separator]).Trim().TrimStart('/');
+    }
+
+    private static string ReadDockerState(JsonElement element)
+    {
+        if (!TryGetProperty(element, "State", out var state)) return "exited";
+        if (state.ValueKind == JsonValueKind.String)
+        {
+            var value = state.GetString();
+            return string.IsNullOrWhiteSpace(value) ? "exited" : value.Trim().ToLowerInvariant();
+        }
+
+        // Older WSLC releases reported the native numeric lifecycle state.
+        return state.ValueKind == JsonValueKind.Number && state.TryGetInt32(out var numeric)
+            ? numeric switch { 1 => "created", 2 => "running", 3 => "exited", _ => "exited" }
+            : "exited";
+    }
+
+    private static long ReadCreatedSeconds(JsonElement element)
+    {
+        if (!TryGetProperty(element, "CreatedAt", out var createdAt)) return 0;
+        if (createdAt.ValueKind == JsonValueKind.Number && createdAt.TryGetInt64(out var seconds)) return seconds;
+        return createdAt.ValueKind == JsonValueKind.String
+               && WslcNativeFormat.TryParseUnixSeconds(createdAt.GetString(), out var parsed)
+            ? parsed
+            : 0;
+    }
+
+    private static string? ReadString(JsonElement element, string name) =>
+        TryGetProperty(element, name, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
+    private static bool TryGetProperty(JsonElement element, string name, out JsonElement value)
+    {
+        foreach (var property in element.EnumerateObject())
+        {
+            if (property.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                value = property.Value;
+                return true;
+            }
+        }
+
+        value = default;
+        return false;
     }
 
     public async Task<WslcCatalogContainer> ResolveAsync(string idOrName, CancellationToken ct)
     {
         var matches = (await ListAsync(ct).ConfigureAwait(false))
-            .Where(container => container.Id.StartsWith(idOrName, StringComparison.OrdinalIgnoreCase)
+            .Where(container => MatchesId(container.Id, idOrName)
                 || string.Equals(container.Name, idOrName.TrimStart('/'), StringComparison.OrdinalIgnoreCase))
             .ToArray();
         return matches.Length switch
@@ -80,16 +152,18 @@ internal sealed class WslcCliContainerCatalog(IWslcCommandRunner runner)
             var command = new List<string> { "container", "inspect" };
             command.AddRange(ids.Skip(offset).Take(MaximumInspectBatchSize));
             command.AddRange(["--format", "json"]);
+            var batch = ids.Skip(offset).Take(MaximumInspectBatchSize).ToList();
             var result = await runner.RunAsync(command, ct).ConfigureAwait(false);
             // Containers removed since the listing are reported on stderr with a nonzero exit while the
             // surviving containers are still returned, so the payload is read regardless of the exit code.
-            Collect(result.StandardOutput, inspected);
+            Collect(result.StandardOutput, batch, inspected);
         }
 
         return inspected;
     }
 
-    private static void Collect(string output, Dictionary<string, JsonElement> inspected)
+    private static void Collect(string output, IReadOnlyList<string> requested,
+        Dictionary<string, JsonElement> inspected)
     {
         if (string.IsNullOrWhiteSpace(output)) return;
         try
@@ -97,11 +171,11 @@ internal sealed class WslcCliContainerCatalog(IWslcCommandRunner runner)
             using var document = JsonDocument.Parse(output);
             if (document.RootElement.ValueKind == JsonValueKind.Array)
             {
-                foreach (var element in document.RootElement.EnumerateArray()) Add(element, inspected);
+                foreach (var element in document.RootElement.EnumerateArray()) Add(element, requested, inspected);
             }
             else
             {
-                Add(document.RootElement, inspected);
+                Add(document.RootElement, requested, inspected);
             }
         }
         catch (JsonException)
@@ -110,7 +184,8 @@ internal sealed class WslcCliContainerCatalog(IWslcCommandRunner runner)
         }
     }
 
-    private static void Add(JsonElement element, Dictionary<string, JsonElement> inspected)
+    private static void Add(JsonElement element, IReadOnlyList<string> requested,
+        Dictionary<string, JsonElement> inspected)
     {
         if (element.ValueKind != JsonValueKind.Object
             || !element.TryGetProperty("Id", out var id)
@@ -120,7 +195,9 @@ internal sealed class WslcCliContainerCatalog(IWslcCommandRunner runner)
             return;
         }
 
-        inspected[value] = element.Clone();
+        // Inspect reports the full digest while WSLC 2.9.10 lists abbreviated IDs, so results are keyed
+        // back to the identifier the caller asked about.
+        inspected[requested.FirstOrDefault(candidate => MatchesId(value, candidate)) ?? value] = element.Clone();
     }
 
     public async Task<JsonElement> InspectAsync(string idOrName, CancellationToken ct)
@@ -162,44 +239,35 @@ internal sealed class WslcCliContainerCatalog(IWslcCommandRunner runner)
         return result;
     }
 
-    private static WslcContainerListItem? ParseListItem(string json)
+    private static JsonElement ParseObject(string json)
     {
         using var document = JsonDocument.Parse(json);
         return document.RootElement.ValueKind == JsonValueKind.Object
-            ? document.RootElement.Deserialize<WslcContainerListItem>(JsonOptions)
+            ? document.RootElement.Clone()
             : throw new DockerApiException(StatusCodes.Status500InternalServerError,
                 "WSLC returned an invalid container list response.");
     }
 
+    /// <summary>
+    /// Matches either direction of an ID prefix. WSLC 2.9.10 abbreviates listed IDs, while create and Docker
+    /// clients use the full digest, so neither side can be assumed to be the longer one.
+    /// </summary>
+    private static bool MatchesId(string listedId, string requested)
+    {
+        var candidate = requested.Trim();
+        return candidate.Length > 0
+               && (listedId.StartsWith(candidate, StringComparison.OrdinalIgnoreCase)
+                   || candidate.StartsWith(listedId, StringComparison.OrdinalIgnoreCase));
+    }
+
     private static DockerApiException NoSuchContainer(string idOrName) => new(StatusCodes.Status404NotFound,
         $"No such container: {idOrName}");
-
-    private sealed class WslcContainerListItem
-    {
-        public string Id { get; init; } = string.Empty;
-
-        public string Name { get; init; } = string.Empty;
-
-        public string Image { get; init; } = string.Empty;
-
-        public int State { get; init; }
-
-        public long CreatedAt { get; init; }
-    }
 }
 
 internal readonly record struct WslcCatalogContainer(
     string Id,
     string Name,
     string Image,
-    int State,
-    long CreatedAt)
-{
-    public string DockerState => State switch
-    {
-        1 => "created",
-        2 => "running",
-        3 => "exited",
-        _ => "exited",
-    };
-}
+    string DockerState,
+    long CreatedAt,
+    string Status);
