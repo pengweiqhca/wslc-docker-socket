@@ -1,131 +1,194 @@
 # wslc-docker-socket
 
-`wslc-docker-socket` exposes a deliberately limited Docker Remote API over a Windows named pipe, backed by [Microsoft WSL Containers (WSLC)](https://learn.microsoft.com/windows/wsl/containers/). Its purpose is to let Docker API clients such as Testcontainers .NET start and inspect ordinary Linux containers without a Docker daemon.
+`wslc-docker-socket` exposes a Docker Remote API surface over a Windows named pipe (or loopback TCP), backed by [Microsoft WSL Containers (WSLC)](https://learn.microsoft.com/windows/wsl/containers/). It lets ordinary Docker clients — Docker CLI, Docker.DotNet, Testcontainers .NET, Portainer, container tooling in editors — manage Linux containers on Windows without a Docker daemon.
 
-> **Preview boundary:** WSLC and this adapter are experimental. The service implements only the Docker API features that it can map faithfully to WSLC; it rejects the others rather than reporting a false success.
+> [!IMPORTANT]
+> WSLC and this adapter are both experimental. Treat this as a local development tool.
 
-## Requirements
+> [!NOTE]
+> The service declares Docker API **1.43** (`MinAPIVersion` 1.24) and accepts any `/v{major}.{minor}` prefix, so clients negotiating newer versions (1.44, 1.51, …) still work.
 
-- Windows with a working WSLC runtime.
-- .NET SDK selected by `global.json`.
-- The Windows SDK reference package version in `Directory.Build.props`.
+**The design rule:** every endpoint either maps faithfully onto a real WSLC capability, or returns an explicit Docker-style error explaining why it cannot. The adapter never fabricates data or reports a false success. Most of this document is about where that line falls.
 
-## Run
+---
 
-The default endpoint is the local named pipe `\\.\pipe\wslc-docker-socket`. Start the service from the repository root:
+## Quick Start
 
 ```pwsh
 dotnet run --project WslcDockerSocket/WslcDockerSocket.csproj --configuration Release
 ```
 
-The pipe name can be changed with `WSLC_DOCKER_SOCKET_PIPE_NAME`. Set `WSLC_DOCKER_SOCKET_DISABLE_NAMED_PIPE=true` only when a named pipe must not be created.
+The default listener is the named pipe `\\.\pipe\docker_engine` — the same pipe Docker Desktop uses — so clients that look there by default need no configuration:
 
-TCP is **disabled by default**. It is unauthenticated Docker-engine access and can create privileged containers, so enable it only for a local development client that cannot use the named pipe:
+```pwsh
+docker ps
+docker images
+```
+
+If you change the pipe name, point clients at it explicitly:
+
+```pwsh
+$env:DOCKER_HOST = 'npipe://./pipe/my-pipe-name'
+```
+
+---
+
+## Key Features
+
+- **Drop-in pipe name.** Listens on Docker's conventional named pipe by default; loopback TCP is opt-in.
+- **Container lifecycle.** Create, start, stop, wait, delete, list, inspect, logs, exec, and archive upload.
+- **Real image metadata.** Image listings report exact byte sizes and creation timestamps, not WSLC's rounded display text.
+- **Docker-shaped listings.** `/containers/json` reports published ports and the container's bridge IP, so UIs like Portainer populate those columns.
+- **Automatic host ports.** A client asking for an ephemeral published port gets a real free port allocated for it.
+- **Live WSLC state.** Volumes, networks, containers, and images are read from WSLC on demand; nothing is cached or invented.
+- **Runs as a Windows service** (`wslc-docker-socket`) or as a console process.
+- **OpenAPI document** at `/swagger/v1/swagger.json`, with Swagger UI enabled.
+- **Honest failures** for anything WSLC cannot back.
+
+---
+
+## Requirements
+
+- Windows with a working WSLC runtime and `wslc` available on `PATH`.
+- .NET SDK 10.0.100 or newer (pinned by `global.json`, `rollForward: latestMinor`).
+- A real WSLC installation for the Testcontainers tests; the unit and HTTP contract tests do not need one.
+
+---
+
+## Configuration
+
+| Environment variable | Default | Purpose |
+| --- | --- | --- |
+| `WSLC_DOCKER_SOCKET_PIPE_NAME` | `docker_engine` | Named pipe to listen on. Cannot be empty. |
+| `WSLC_DOCKER_SOCKET_DISABLE_NAMED_PIPE` | `false` | Set `true` only when no named pipe may be created. |
+| `WSLC_DOCKER_SOCKET_ENABLE_TCP` | `false` | Enables the loopback TCP listener. |
+| `WSLC_DOCKER_SOCKET_TCP_PORT` | `2375` | TCP port, used only when TCP is enabled. |
+
+At least one listener must remain enabled; disabling the pipe without enabling TCP fails at startup.
+
+> [!WARNING]
+> TCP is unauthenticated Docker-engine access, and the adapter performs no authentication of its own. It binds `127.0.0.1` only. Do not expose or port-forward it to an untrusted network.
 
 ```pwsh
 $env:WSLC_DOCKER_SOCKET_ENABLE_TCP = 'true'
-$env:WSLC_DOCKER_SOCKET_TCP_PORT = '2375' # optional; this is the default
+$env:WSLC_DOCKER_SOCKET_TCP_PORT = '2375'   # optional; this is the default
 ```
 
-TCP listens only on `127.0.0.1`. Do not expose or forward that port to an untrusted network.
+---
 
-## Testcontainers .NET
-
-Point Testcontainers/Docker.DotNet at the named pipe, for example:
+## Usage with Testcontainers .NET
 
 ```pwsh
-$env:DOCKER_HOST = 'npipe://./pipe/wslc-docker-socket'
+$env:DOCKER_HOST = 'npipe://./pipe/docker_engine'
 $env:TESTCONTAINERS_RYUK_DISABLED = 'true'
 ```
 
-Ryuk requires mounting the Docker socket into a container. WSLC Docker socket intentionally rejects Docker socket mounts, bind mounts, volumes, and tmpfs mounts, so Ryuk must be disabled. This service is currently suitable for basic generic containers that use an image, command, environment, labels, working directory, port bindings, logs, wait, and exec.
+Ryuk must be disabled because it mounts the Docker socket into a container, and this adapter rejects socket and bind mounts. Generic containers work when they rely on an image, command, entrypoint, environment, labels, published ports, logs, wait, exec, and archive upload — which covers the Redis, Kafka, and RocketMQ scenarios in the test suite.
 
-## Implemented API surface
+---
 
-Both unversioned paths and `/v{major.minor}/...` paths are accepted for:
+## API surface
 
-`/version` reports the loaded `Microsoft.WSL.Containers` SDK assembly version. Its Docker API range is an adapter capability declaration, not a Docker daemon/Go/kernel probe. `/info` image counts come from the active WSLC session; after catalog discovery is enabled, its container counts come from the current WSLC catalog rather than this process's runtime overlay. For Docker-client diagnostics, `/info` also caches best-effort local probes of `wslc version`, the default WSL distribution's `uname -r`, and `/proc/meminfo`; it reports the Windows host description explicitly qualified as `with WSL Containers`. Failed probes are emitted as an empty string or zero rather than fabricated values. WSLC 2.9.9 does not expose Docker daemon metadata, global container enumeration, Docker-network metadata, or a typed full inspect schema, so the adapter does not fabricate those values.
+Available on both unversioned and `/v{major}.{minor}` paths:
 
-- `/_ping`, `/version`, `/info`
-- image inspect and pull
-- volume list and inspect
-- network list and inspect
-- container create, start, stop, wait, list, inspect, logs, attach, and delete
-- exec create, start, and inspect
+| Area | Endpoints |
+| --- | --- |
+| System | `GET/HEAD /_ping`, `GET /version`, `GET /info` |
+| Images | `GET /images/json`, `GET /images/{name}/json`, `POST /images/create` |
+| Containers | `POST /containers/create`, `.../start`, `.../stop`, `.../wait`, `GET /containers/json`, `GET /containers/{id}/json`, `GET /containers/{id}/logs`, `PUT /containers/{id}/archive`, `DELETE /containers/{id}` |
+| Exec | `POST /containers/{id}/exec`, `POST /exec/{id}/start`, `GET /exec/{id}/json` |
+| Volumes | `GET /volumes`, `GET /volumes/{name}` |
+| Networks | `GET /networks`, `GET /networks/{id}` |
 
-### WSLC SDK catalog compatibility boundary
+`GET /version` reports this adapter's assembly version plus its Docker API range. That range is a capability declaration, not a probe of a Docker daemon. `GET /info` reports counts from live WSLC state and best-effort local probes (`wslc version`, the default distribution's kernel release, and `/proc/meminfo`); a failed probe yields an empty string or zero rather than a fabricated value.
 
-`Microsoft.WSL.Containers` is the primary integration layer for lifecycle operations, events, logs, attach, and exec. However, the currently pinned **2.9.9** SDK exposes operations for a *known* container (`WslcOpenContainer`, `WslcInspectContainer`, and `WslcGetContainerState`), but no public operation that enumerates every container in a WSLC scope. That means a fresh adapter process cannot discover containers created directly with `wslc` or by another Docker API client such as Portainer.
-
-The adapter therefore uses the local `wslc` CLI only as a temporary authoritative catalog boundary:
-
-```pwsh
-wslc list -a --format json
-wslc container inspect <id-or-name> --format json
-```
-
-The CLI supplies global discovery and Docker-shaped inspection data for `/containers/json`, `/containers/{id}/json`, and the container totals in `/info`. It is not used to replace SDK-backed lifecycle and streaming operations. The list response is deliberately parsed as either a JSON array or a single JSON object because the CLI emits the latter when exactly one container exists.
-
-#### Replacing the CLI catalog after an SDK upgrade
-
-When updating `Microsoft.WSL.Containers`, first check whether its **public** session/container APIs can enumerate every container in the default scope and all active named WSLC sessions, without relying on prior IDs or names. If that capability exists, replace `WslcCliContainerCatalog` with an SDK-backed catalog and remove process invocation rather than introducing a second cache.
-
-Before accepting that replacement, validate it against a WSLC installation containing a container created outside this adapter (for example `mongo`):
-
-1. An SDK catalog call returns the full ID, name, image, creation time, and current state for both externally created and adapter-created containers.
-2. `GET /v1.24/containers/json?all=1` contains the external container with the same ID/name/image/state as `wslc list -a --format json`.
-3. `GET /v1.24/containers/<id-prefix>/json` returns HTTP 200 and preserves Docker-compatible inspect data; do not replace the CLI inspect path until the SDK data can be mapped faithfully.
-4. `/v1.24/info` container totals match the SDK catalog result.
-5. Restarting the adapter leaves existing containers intact and continues to discover them; shutting down the adapter must release handles, not terminate the WSLC session or delete workloads.
-6. Run the normal test suite plus the real WSLC smoke check described below.
-
-Container output is emitted as Docker's raw multiplexed stream. Attach honours the `logs`, `stream`, `stdout`, and `stderr` query flags. It is output-only: attach stdin/hijacking is not implemented.
-
-Volume and network list/inspect endpoints query the WSLC CLI for the current authoritative state rather than reporting fabricated empty collections. They are read-only at present: volume/network mutation and mounting semantics remain unsupported until their Docker lifecycle contracts are mapped deliberately.
-
-`HostConfig.AutoRemove` maps to WSLC's `container create --rm` option. WSLC can remove the container promptly after its init process exits; after that, Docker inspect, logs, wait, and delete requests can return `404`. Clients that require post-exit container state must set `AutoRemove` to `false`.
+---
 
 ## Explicit compatibility limits
 
-The service returns a Docker-style `501 Not Implemented` for features it cannot represent safely, including:
+These return a Docker-style `501 Not Implemented` with the reason in the message, because WSLC exposes no equivalent:
 
-- bind/volume/tmpfs/Docker-socket mounts and archive copy;
-- network creation/deletion/connect/disconnect, non-default network modes, and custom Docker networks;
-- TTY containers and attach stdin;
-- multiple host bindings for one container port, host-IP-specific/IPv6 bindings, and port protocols other than TCP/UDP;
-- anonymous Docker Registry authentication envelopes are accepted for image pulls; username/password and identity/registry tokens remain unsupported because WSLC exposes no credential option;
+| Request | Why it cannot be mapped |
+| --- | --- |
+| `GET /events` | WSLC has no event source at all: no `events` command and no change notifications. |
+| `POST /containers/{id}/resize`, `POST /exec/{id}/resize` | There is no TTY to resize — TTY containers are rejected at create and execs run without one. |
+| `GET /images/{name}/history` | WSLC reports no per-layer build history. Inspect exposes only layer digests, without the per-layer command, size, or timestamp Docker's response requires. |
+| Bind, volume, tmpfs, and Docker-socket mounts | Mount semantics are not mapped. |
+| Network create/delete/connect/disconnect, non-default network modes | Only the default bridge network is available. |
+| TTY containers | Not supported. |
+| `POST /containers/{id}/attach` | Not implemented, with or without stdin. Use `GET /containers/{id}/logs` for output. |
+| Multiple host bindings per container port, host-IP-specific and IPv6 bindings, protocols other than TCP/UDP | WSLC publishing cannot express them. |
+| Registry credentials | WSLC's `image pull` has no authentication option. |
+| `copyUIDGID`, `noOverwriteDirNonDir` on archive upload | WSLC's copy cannot honour them. |
 
-Containers remain WSLC workloads after this service stops. The adapter must release its own handles without deleting containers or terminating a WSLC session, so it can be used as a long-lived container-management endpoint rather than only as a Testcontainers helper.
+Registry auth is classified locally before any CLI call: an anonymous envelope (absent, literal `null`, or JSON whose credential fields are all empty) is accepted for pulls; a malformed value is rejected with `400`; username/password and identity/registry tokens are rejected with `501` and are never logged or forwarded.
 
-Exec output is collected before the response is sent and is capped at 16 MiB per stream. This prevents unbounded memory use but means exec start is not yet live streaming. Container attach subscriptions are bounded; slow consumers are disconnected rather than allowing the service to grow memory without bound.
+Unknown endpoints return Docker's `404` shape with `endpoint not implemented: <method> <path>`, which makes missing surface easy to spot in logs.
+
+---
+
+## How it maps onto WSLC
+
+All state comes from the `wslc` CLI in its default, unqualified scope; the adapter never passes `--session`.
+
+**Image sizes and timestamps.** `wslc image list` renders these for humans (`146MB`, `2026-08-25 08:48:50 +0800 GMT+8`), which is lossy and not what Docker clients parse. The adapter therefore issues a single batched `wslc image inspect <id> <id> … --format json` per listing and takes exact byte counts and RFC3339 timestamps from it. If an image is missing from that payload — for example, removed between the two calls — the rendered list values are kept rather than failing the whole listing.
+
+**Container ports and addresses.** `/containers/json` similarly resolves published ports and the bridge IP from one batched `wslc container inspect`, since the list output carries no network address. Single-container lookups and `/info` deliberately use the cheap listing so they never trigger a full inspect sweep.
+
+**Archive upload.** `PUT /containers/{id}/archive` streams the raw request body into `wslc container cp - <id>:<path>`. The tar is never extracted on the host or buffered to disk, which avoids both path-traversal exposure and unbounded memory use. Destination paths must be absolute and free of control characters.
+
+**Ephemeral ports.** WSLC requires an explicit nonzero host port, so a Docker request for port `0` or an unspecified host port has a free TCP port allocated before the publish argument is built.
+
+**API version prefix.** A leading `/v{major}.{minor}` is moved into `PathBase` by middleware ahead of routing, so each endpoint is registered once. Error messages and logs still report the client's original path.
+
+**AutoRemove.** `HostConfig.AutoRemove` maps to `container create --rm`. WSLC may remove the container promptly once its init process exits, after which inspect, logs, wait, and delete can return `404`. Clients needing post-exit state must set `AutoRemove` to `false`.
+
+**Streaming boundaries.** Container output uses Docker's raw multiplexed stream. `GET /containers/{id}/logs` is the supported output path: it honours `stdout` and `stderr`, and with `follow=1` it forwards `wslc container logs --follow` as a chunked raw stream. Exec output is collected before the response is sent and capped at 16 MiB per stream, so exec start is not yet live streaming. Output subscriptions are bounded; a consumer that cannot keep up is disconnected rather than letting memory grow.
+
+**Lifecycle ownership.** Containers remain WSLC workloads after the adapter stops. Shutdown releases the adapter's own handles without deleting containers or terminating a WSLC session, so it can run as a long-lived management endpoint rather than only as a test helper.
+
+---
 
 ## Build and test
 
 ```pwsh
-dotnet restore WslcDockerSocket.slnx -p:WindowsSdkPackageVersion=10.0.26100.80
-dotnet build WslcDockerSocket.slnx --configuration Release --no-restore -p:WindowsSdkPackageVersion=10.0.26100.80
-dotnet WslcDockerSocket.Tests/bin/Release/net10.0/WslcDockerSocket.Tests.dll -noLogo -parallelMode none -reporter verbose -stopOnFail
+dotnet restore WslcDockerSocket.slnx
+dotnet build WslcDockerSocket.slnx --configuration Release --no-restore
+dotnet WslcDockerSocket.Tests/bin/Release/net10.0/WslcDockerSocket.Tests.dll -noLogo -parallelMode none
 ```
 
-The unit/HTTP contract suite does not require WSLC. A separate, manually run smoke verification should pull an image and exercise create/start/inspect/logs/exec/delete against a real WSLC installation.
+The suite mixes three kinds of test:
 
-### RocketMQ Testcontainers E2E
+- **Unit and protocol tests** cover port parsing, stream framing, registry-auth classification, and CLI command vectors against a recording fake. No WSLC required.
+- **HTTP contract tests** run the real application on an in-process pipe and assert Docker's status codes and error payloads. No WSLC required.
+- **Testcontainers tests** start real Redis, Kafka, and RocketMQ containers through an in-process adapter, so they need a working WSLC installation and will pull images on first run. They dominate the roughly 70-second runtime.
 
-`RocketMqTestcontainersE2eTest` uses the `apache/rocketmq:5.3.3` NameServer + Broker + Proxy startup script, a randomly selected valid gRPC port, the proxy startup log wait, and the `mqadmin clusterList` readiness probe. It is deliberately gated to avoid starting a real container in normal unit-test runs. Start the adapter in one terminal, then run the test with both required settings in another:
+Run one class at a time with `-class`, for example:
 
 ```pwsh
-# Terminal 1
-dotnet run --project WslcDockerSocket/WslcDockerSocket.csproj --configuration Release
-
-# Terminal 2
-$env:DOCKER_HOST = 'npipe://./pipe/wslc-docker-socket'
-$env:TESTCONTAINERS_RYUK_DISABLED = 'true'
-$env:WSLC_DOCKER_SOCKET_RUN_E2E = 'true'
-dotnet WslcDockerSocket.Tests/bin/Release/net10.0/WslcDockerSocket.Tests.dll -noLogo -parallelMode none -reporter verbose -stopOnFail
+dotnet WslcDockerSocket.Tests/bin/Release/net10.0/WslcDockerSocket.Tests.dll -noLogo -parallelMode none -class WslcDockerSocket.Tests.DockerApiContractTest
 ```
 
-The E2E test will not run unless both `WSLC_DOCKER_SOCKET_RUN_E2E=true` and the exact adapter `DOCKER_HOST` value are present. This prevents an accidental run against a locally installed Docker/Rancher engine.
+Because the tests bind a named pipe, an interrupted run can leave a host process holding it and the next run fails with `address already in use`. Terminate the leftover test host and re-run.
+
+---
+
+## Security and limitations
+
+- Intended for local development and experimentation.
+- The adapter authenticates nothing. Anyone able to reach the pipe or the TCP port has full control over WSLC containers, including creating new ones.
+- Docker API coverage is partial by design; see the limits above.
+- Client UIs will show gaps for data WSLC does not expose. Compose/stack grouping and label-driven views are empty because container labels are not yet reported in listings, and views that rely on `/events` do not refresh automatically.
+
+---
 
 ## License
 
 MIT.
+
+---
+
+## Acknowledgements
+
+- Built on [Microsoft WSL Containers](https://learn.microsoft.com/windows/wsl/containers/).
+- README structure inspired by [socktainer](https://github.com/socktainer/socktainer), which does the same job for Apple's containerization libraries on macOS.

@@ -9,6 +9,8 @@ using Api;
 /// </summary>
 internal sealed class WslcCliContainerCatalog(IWslcCommandRunner runner)
 {
+    private const int MaximumInspectBatchSize = 100;
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
@@ -63,6 +65,62 @@ internal sealed class WslcCliContainerCatalog(IWslcCommandRunner runner)
             _ => throw new DockerApiException(StatusCodes.Status409Conflict,
                 $"Container identifier '{idOrName}' is ambiguous."),
         };
+    }
+
+    /// <summary>
+    /// Inspects many containers in one CLI invocation, keyed by container id. WSLC's list output omits the
+    /// network address, so Docker's list response can only report it from inspect.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, JsonElement>> InspectManyAsync(IReadOnlyList<string> ids,
+        CancellationToken ct)
+    {
+        var inspected = new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
+        for (var offset = 0; offset < ids.Count; offset += MaximumInspectBatchSize)
+        {
+            var command = new List<string> { "container", "inspect" };
+            command.AddRange(ids.Skip(offset).Take(MaximumInspectBatchSize));
+            command.AddRange(["--format", "json"]);
+            var result = await runner.RunAsync(command, ct).ConfigureAwait(false);
+            // Containers removed since the listing are reported on stderr with a nonzero exit while the
+            // surviving containers are still returned, so the payload is read regardless of the exit code.
+            Collect(result.StandardOutput, inspected);
+        }
+
+        return inspected;
+    }
+
+    private static void Collect(string output, Dictionary<string, JsonElement> inspected)
+    {
+        if (string.IsNullOrWhiteSpace(output)) return;
+        try
+        {
+            using var document = JsonDocument.Parse(output);
+            if (document.RootElement.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var element in document.RootElement.EnumerateArray()) Add(element, inspected);
+            }
+            else
+            {
+                Add(document.RootElement, inspected);
+            }
+        }
+        catch (JsonException)
+        {
+            // A listing must not fail because inspect output could not be read.
+        }
+    }
+
+    private static void Add(JsonElement element, Dictionary<string, JsonElement> inspected)
+    {
+        if (element.ValueKind != JsonValueKind.Object
+            || !element.TryGetProperty("Id", out var id)
+            || id.ValueKind != JsonValueKind.String
+            || id.GetString() is not { Length: > 0 } value)
+        {
+            return;
+        }
+
+        inspected[value] = element.Clone();
     }
 
     public async Task<JsonElement> InspectAsync(string idOrName, CancellationToken ct)

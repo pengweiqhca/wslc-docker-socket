@@ -12,6 +12,7 @@ namespace WslcDockerSocket.Engine;
 internal sealed class WslcDockerEngine : IDisposable
 {
     private static readonly TimeSpan WaitPollInterval = TimeSpan.FromMilliseconds(250);
+    private static readonly JsonElement EmptyJsonObject = JsonDocument.Parse("{}").RootElement.Clone();
     private readonly IWslcCommandRunner _commandRunner;
     private readonly WslcCliContainerCatalog _containerCatalog;
     private readonly WslcCliImageCatalog _imageCatalog;
@@ -216,7 +217,10 @@ internal sealed class WslcDockerEngine : IDisposable
         var includeStopped = string.Equals(query["all"], "1", StringComparison.Ordinal)
                              || string.Equals(query["all"], "true", StringComparison.OrdinalIgnoreCase);
         var containers = await _containerCatalog.ListAsync(ct).ConfigureAwait(false);
-        return [.. containers.Where(container => includeStopped || container.DockerState == "running").Select(ToListResponse)];
+        var visible = containers.Where(container => includeStopped || container.DockerState == "running").ToList();
+        var inspected = await _containerCatalog.InspectManyAsync([.. visible.Select(container => container.Id)], ct)
+            .ConfigureAwait(false);
+        return [.. visible.Select(container => ToListResponse(container, inspected))];
     }
 
     public async Task<DockerExecState> CreateExecAsync(string containerId, DockerExecCreateRequest request, CancellationToken ct)
@@ -412,19 +416,78 @@ internal sealed class WslcDockerEngine : IDisposable
         return value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out exitCode);
     }
 
-    private static object ToListResponse(WslcCatalogContainer container) => new
+    private static object ToListResponse(WslcCatalogContainer container,
+        IReadOnlyDictionary<string, JsonElement> inspected)
     {
-        container.Id,
-        Names = new[] { "/" + container.Name.TrimStart('/') },
-        container.Image,
-        ImageID = container.Image,
-        Command = string.Empty,
-        Created = container.CreatedAt,
-        State = container.DockerState,
-        Status = container.DockerState switch { "running" => "Up", "created" => "Created", _ => "Exited" },
-        Labels = new Dictionary<string, string>(),
-        Ports = Array.Empty<object>(),
-    };
+        inspected.TryGetValue(container.Id, out var detail);
+        return new
+        {
+            container.Id,
+            Names = new[] { "/" + container.Name.TrimStart('/') },
+            container.Image,
+            ImageID = container.Image,
+            Command = string.Empty,
+            Created = container.CreatedAt,
+            State = container.DockerState,
+            Status = container.DockerState switch { "running" => "Up", "created" => "Created", _ => "Exited" },
+            Labels = new Dictionary<string, string>(),
+            Ports = ToListPorts(detail),
+            NetworkSettings = new { Networks = ToListNetworks(detail) },
+        };
+    }
+
+    /// <summary>Projects the inspected port bindings onto Docker's flat list-response port shape.</summary>
+    private static object[] ToListPorts(JsonElement detail)
+    {
+        if (detail.ValueKind != JsonValueKind.Object
+            || !detail.TryGetProperty("Ports", out var ports)
+            || ports.ValueKind != JsonValueKind.Object)
+        {
+            return [];
+        }
+
+        var listed = new List<object>();
+        foreach (var port in ports.EnumerateObject())
+        {
+            var separator = port.Name.IndexOf('/');
+            if (!int.TryParse(separator < 0 ? port.Name : port.Name[..separator], out var privatePort)) continue;
+            var type = separator < 0 ? "tcp" : port.Name[(separator + 1)..];
+            if (port.Value.ValueKind != JsonValueKind.Array || port.Value.GetArrayLength() == 0)
+            {
+                // Docker reports an exposed but unpublished port without a host address or public port.
+                listed.Add(new { PrivatePort = privatePort, Type = type });
+                continue;
+            }
+
+            foreach (var binding in port.Value.EnumerateArray())
+            {
+                listed.Add(new
+                {
+                    IP = ReadString(binding, "HostIp"),
+                    PrivatePort = privatePort,
+                    PublicPort = int.TryParse(ReadString(binding, "HostPort"), out var publicPort) ? publicPort : 0,
+                    Type = type,
+                });
+            }
+        }
+
+        return [.. listed];
+    }
+
+    private static JsonElement ToListNetworks(JsonElement detail) =>
+        detail.ValueKind == JsonValueKind.Object
+        && detail.TryGetProperty("NetworkSettings", out var networkSettings)
+        && networkSettings.ValueKind == JsonValueKind.Object
+        && networkSettings.TryGetProperty("Networks", out var networks)
+        && networks.ValueKind == JsonValueKind.Object
+            ? networks
+            : EmptyJsonObject;
+
+    private static string ReadString(JsonElement element, string name) =>
+        element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out var value)
+        && value.ValueKind == JsonValueKind.String
+            ? value.GetString() ?? string.Empty
+            : string.Empty;
 
     private static bool HasExplicitPortBinding(string exposedPort, Dictionary<string, List<DockerHostPortBinding>?>? bindings)
     {

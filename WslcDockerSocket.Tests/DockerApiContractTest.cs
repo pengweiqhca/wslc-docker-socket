@@ -87,6 +87,33 @@ public sealed class DockerApiContractTest(IHttpClientFactory factory)
         await AssertDockerErrorAsync(response, "Archive destination path is required", ct);
     }
 
+    [Theory]
+    [InlineData("/v1.43/images/mysql/history")]
+    [InlineData("/images/mysql/history")]
+    // A namespaced repository keeps its slashes in the request path.
+    [InlineData("/v1.43/images/mcr.microsoft.com/mssql/server/history")]
+    public async Task ImageHistoryReportsThatWslcHasNoLayerHistoryInsteadOfAnUnknownEndpoint(string path)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var response = await _client.GetAsync(path, ct);
+
+        Assert.Equal(HttpStatusCode.NotImplemented, response.StatusCode);
+        await AssertDockerErrorAsync(response, "Image history is not supported", ct);
+    }
+
+    [Theory]
+    [InlineData("/v1.43/containers/id/resize?h=40&w=120")]
+    [InlineData("/containers/id/resize?h=40&w=120")]
+    [InlineData("/v1.43/exec/id/resize?h=40&w=120")]
+    public async Task TtyResizeReportsThatNoTtyExistsInsteadOfAnUnknownEndpoint(string path)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var response = await _client.PostAsync(path, null, ct);
+
+        Assert.Equal(HttpStatusCode.NotImplemented, response.StatusCode);
+        await AssertDockerErrorAsync(response, "TTY resize is not supported", ct);
+    }
+
     [Fact]
     public async Task EventStreamReportsThatWslcHasNoEventSourceInsteadOfAnUnknownEndpoint()
     {

@@ -23,6 +23,61 @@ public sealed class WslcCliDefaultScopeTest
     }
 
     [Fact]
+    public async Task ContainerListReportsPublishedPortsAndNetworkAddressFromOneBatchedInspect()
+    {
+        var runner = new RecordingRunner(command => command.SequenceEqual(["container", "list", "-a", "--format", "json"])
+            ? new WslcCommandResult(
+                "{\"CreatedAt\":1789215775,\"Id\":\"19c58a00a160\",\"Image\":\"mysql\",\"Name\":\"mysql\",\"State\":2}",
+                string.Empty,
+                0)
+            : command.SequenceEqual(["container", "inspect", "19c58a00a160", "--format", "json"])
+                ? new WslcCommandResult(
+                    "[{\"Id\":\"19c58a00a160\",\"Ports\":{\"3306/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"3306\"}],\"33060/tcp\":[]},"
+                    + "\"NetworkSettings\":{\"Networks\":{\"bridge\":{\"Gateway\":\"172.17.0.1\",\"IPAddress\":\"172.17.0.3\"}}}}]",
+                    string.Empty,
+                    0)
+                : throw new Xunit.Sdk.XunitException($"Unexpected command: {string.Join(' ', command)}"));
+        using var engine = new WslcDockerEngine(runner, new WslRuntimeDiagnosticsProvider());
+
+        var listed = Assert.Single(await engine.ListContainersAsync(new QueryCollection(), TestContext.Current.CancellationToken));
+        var container = JsonSerializer.SerializeToElement(listed);
+
+        Assert.Equal(2, runner.Commands.Count);
+        Assert.Equal("172.17.0.3", container.GetProperty("NetworkSettings").GetProperty("Networks")
+            .GetProperty("bridge").GetProperty("IPAddress").GetString());
+        var ports = container.GetProperty("Ports");
+        Assert.Equal(2, ports.GetArrayLength());
+        Assert.Equal("127.0.0.1", ports[0].GetProperty("IP").GetString());
+        Assert.Equal(3306, ports[0].GetProperty("PrivatePort").GetInt32());
+        Assert.Equal(3306, ports[0].GetProperty("PublicPort").GetInt32());
+        Assert.Equal("tcp", ports[0].GetProperty("Type").GetString());
+        // An exposed but unpublished port carries no host address or public port.
+        Assert.Equal(33060, ports[1].GetProperty("PrivatePort").GetInt32());
+        Assert.False(ports[1].TryGetProperty("PublicPort", out _));
+        AssertDefaultScope(runner);
+    }
+
+    [Fact]
+    public async Task ContainerListKeepsEmptyPortsWhenInspectOmitsTheContainer()
+    {
+        var runner = new RecordingRunner(command => command.SequenceEqual(["container", "list", "-a", "--format", "json"])
+            ? new WslcCommandResult(
+                "{\"CreatedAt\":1789215775,\"Id\":\"19c58a00a160\",\"Image\":\"mysql\",\"Name\":\"mysql\",\"State\":2}",
+                string.Empty,
+                0)
+            // A container removed since the listing must not fail the whole list response.
+            : new WslcCommandResult(string.Empty, "Container '19c58a00a160' not found.", 1));
+        using var engine = new WslcDockerEngine(runner, new WslRuntimeDiagnosticsProvider());
+
+        var listed = Assert.Single(await engine.ListContainersAsync(new QueryCollection(), TestContext.Current.CancellationToken));
+        var container = JsonSerializer.SerializeToElement(listed);
+
+        Assert.Empty(container.GetProperty("Ports").EnumerateArray());
+        Assert.Empty(container.GetProperty("NetworkSettings").GetProperty("Networks").EnumerateObject());
+        AssertDefaultScope(runner);
+    }
+
+    [Fact]
     public async Task ContainerInspectNormalizesDockerNameAndPorts()
     {
         var runner = new RecordingRunner(command => command.SequenceEqual(["container", "list", "-a", "--format", "json"])

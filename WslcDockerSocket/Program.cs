@@ -43,7 +43,11 @@ var app = builder.Build();
 
 app.Lifetime.ApplicationStopping.Register(app.Services.GetRequiredService<WslcDockerEngine>().Dispose);
 
+// The version prefix must move into PathBase before routing, so UseRouting is placed explicitly:
+// WebApplication would otherwise match endpoints ahead of all application middleware.
+app.UseDockerApiVersionPathBase();
 app.UseDockerApiExceptionHandler();
+app.UseRouting();
 app.UseSwagger();
 app.UseSwaggerUI(options =>
 {
