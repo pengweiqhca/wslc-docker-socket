@@ -7,7 +7,7 @@ using WslcDockerSocket.Hosting;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Host.UseWindowsService(options => options.ServiceName = "wslc-docker-socket");
+builder.Configuration.AddJsonFile("appsettings.user.json", optional: true, reloadOnChange: true);
 
 var socketOptions = DockerSocketOptions.From(builder.Configuration);
 

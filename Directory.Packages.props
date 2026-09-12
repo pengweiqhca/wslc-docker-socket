@@ -5,9 +5,6 @@
     <CentralPackageFloatingVersionsEnabled>true</CentralPackageFloatingVersionsEnabled>
   </PropertyGroup>
   <ItemGroup>
-    <PackageVersion Include="Microsoft.AspNetCore.Hosting.WindowsServices" Version="$(_TargetFrameworkVersionWithoutV).*" />
-    <PackageVersion Include="Microsoft.Extensions.Hosting.WindowsServices" Version="$(_TargetFrameworkVersionWithoutV).*" />
-    <!-- Unit, property, contract and assumption test dependencies: -->
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
     <PackageVersion Include="Swashbuckle.AspNetCore" Version="10.2.3" />
     <PackageVersion Include="Testcontainers.Kafka" Version="4.15.0" />

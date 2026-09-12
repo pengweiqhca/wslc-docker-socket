@@ -41,7 +41,6 @@ $env:DOCKER_HOST = 'npipe://./pipe/my-pipe-name'
 - **Docker-shaped listings.** `/containers/json` reports published ports and the container's bridge IP, so UIs like Portainer populate those columns.
 - **Automatic host ports.** A client asking for an ephemeral published port gets a real free port allocated for it.
 - **Live WSLC state.** Volumes, networks, containers, and images are read from WSLC on demand; nothing is cached or invented.
-- **Runs as a Windows service** (`wslc-docker-socket`) or as a console process.
 - **OpenAPI document** at `/swagger/v1/swagger.json`, with Swagger UI enabled.
 - **Honest failures** for anything WSLC cannot back.
 
@@ -63,6 +62,8 @@ $env:DOCKER_HOST = 'npipe://./pipe/my-pipe-name'
 | `WSLC_DOCKER_SOCKET_DISABLE_NAMED_PIPE` | `false` | Set `true` only when no named pipe may be created. |
 | `WSLC_DOCKER_SOCKET_ENABLE_TCP` | `false` | Enables the loopback TCP listener. |
 | `WSLC_DOCKER_SOCKET_TCP_PORT` | `2375` | TCP port, used only when TCP is enabled. |
+
+Settings can be supplied as environment variables, command-line switches, or an optional `appsettings.user.json` beside the executable, which is reloaded when it changes.
 
 At least one listener must remain enabled; disabling the pipe without enabling TCP fails at startup.
 
