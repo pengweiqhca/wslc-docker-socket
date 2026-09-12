@@ -2,9 +2,6 @@ namespace WslcDockerSocket.Streaming;
 
 using System.IO;
 using System.Threading.Channels;
-using Microsoft.WSL.Containers;
-using Windows.Storage.Streams;
-using WslcProcess = Microsoft.WSL.Containers.Process;
 
 internal enum DockerStreamType : byte
 {
@@ -233,50 +230,5 @@ internal sealed class DockerOutputBuffer
         public ChannelReader<DockerOutputFrame> Reader { get; } = reader;
 
         public void Dispose() => owner.Unsubscribe(id);
-    }
-}
-
-internal static class DockerProcessOutput
-{
-    private const int BufferSize = 81920;
-    private const int MaximumBytes = 16 * 1024 * 1024;
-
-    public static async Task<byte[]> ReadAsync(WslcProcess process, ProcessOutputHandle output, CancellationToken ct)
-    {
-        using var stream = process.GetOutputStream(output);
-        await using var memory = new MemoryStream();
-        while (true)
-        {
-            var buffer = new Buffer(BufferSize);
-            var operation = stream.ReadAsync(buffer, buffer.Capacity, InputStreamOptions.None);
-            await using var registration = ct.Register(operation.Cancel);
-            IBuffer read;
-            try
-            {
-                read = await operation;
-            }
-            catch (Exception) when (ct.IsCancellationRequested)
-            {
-                throw new OperationCanceledException(ct);
-            }
-
-            if (read.Length == 0)
-            {
-                break;
-            }
-
-            if (memory.Length + read.Length > MaximumBytes)
-            {
-                operation.Cancel();
-                throw new IOException($"Docker exec output exceeds the {MaximumBytes} byte buffering limit.");
-            }
-
-            using var reader = DataReader.FromBuffer(read);
-            var bytes = new byte[read.Length];
-            reader.ReadBytes(bytes);
-            await memory.WriteAsync(bytes, ct).ConfigureAwait(false);
-        }
-
-        return memory.ToArray();
     }
 }

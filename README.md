@@ -24,7 +24,7 @@ TCP is **disabled by default**. It is unauthenticated Docker-engine access and c
 
 ```pwsh
 $env:WSLC_DOCKER_SOCKET_ENABLE_TCP = 'true'
-$env:WSLC_DOCKER_SOCKET_TCP_PORT = '23750' # optional; this is the default
+$env:WSLC_DOCKER_SOCKET_TCP_PORT = '2375' # optional; this is the default
 ```
 
 TCP listens only on `127.0.0.1`. Do not expose or forward that port to an untrusted network.
@@ -83,7 +83,7 @@ Container output is emitted as Docker's raw multiplexed stream. Attach honours t
 
 Volume and network list/inspect endpoints query the WSLC CLI for the current authoritative state rather than reporting fabricated empty collections. They are read-only at present: volume/network mutation and mounting semantics remain unsupported until their Docker lifecycle contracts are mapped deliberately.
 
-`HostConfig.AutoRemove` maps to WSLC auto-remove. Once its init process exits, WSLC can remove the container promptly, so clients must not require a later Docker inspect; this adapter retains its observed exit code and buffered logs only while the process remains alive.
+`HostConfig.AutoRemove` maps to WSLC's `container create --rm` option. WSLC can remove the container promptly after its init process exits; after that, Docker inspect, logs, wait, and delete requests can return `404`. Clients that require post-exit container state must set `AutoRemove` to `false`.
 
 ## Explicit compatibility limits
 
@@ -93,7 +93,7 @@ The service returns a Docker-style `501 Not Implemented` for features it cannot 
 - network creation/deletion/connect/disconnect, non-default network modes, and custom Docker networks;
 - TTY containers and attach stdin;
 - multiple host bindings for one container port, host-IP-specific/IPv6 bindings, and port protocols other than TCP/UDP;
-- username/password registry authentication (WSLC identity tokens are supported).
+- anonymous Docker Registry authentication envelopes are accepted for image pulls; username/password and identity/registry tokens remain unsupported because WSLC exposes no credential option;
 
 Containers remain WSLC workloads after this service stops. The adapter must release its own handles without deleting containers or terminating a WSLC session, so it can be used as a long-lived container-management endpoint rather than only as a Testcontainers helper.
 
@@ -104,7 +104,7 @@ Exec output is collected before the response is sent and is capped at 16 MiB per
 ```pwsh
 dotnet restore WslcDockerSocket.slnx -p:WindowsSdkPackageVersion=10.0.26100.80
 dotnet build WslcDockerSocket.slnx --configuration Release --no-restore -p:WindowsSdkPackageVersion=10.0.26100.80
-dotnet WslcDockerSocket.Tests/bin/Release/net10.0-windows10.0.19041/WslcDockerSocket.Tests.dll -noLogo -parallelMode none -reporter verbose -stopOnFail
+dotnet WslcDockerSocket.Tests/bin/Release/net10.0/WslcDockerSocket.Tests.dll -noLogo -parallelMode none -reporter verbose -stopOnFail
 ```
 
 The unit/HTTP contract suite does not require WSLC. A separate, manually run smoke verification should pull an image and exercise create/start/inspect/logs/exec/delete against a real WSLC installation.
@@ -121,7 +121,7 @@ dotnet run --project WslcDockerSocket/WslcDockerSocket.csproj --configuration Re
 $env:DOCKER_HOST = 'npipe://./pipe/wslc-docker-socket'
 $env:TESTCONTAINERS_RYUK_DISABLED = 'true'
 $env:WSLC_DOCKER_SOCKET_RUN_E2E = 'true'
-dotnet WslcDockerSocket.Tests/bin/Release/net10.0-windows10.0.19041/WslcDockerSocket.Tests.dll -noLogo -parallelMode none -reporter verbose -stopOnFail
+dotnet WslcDockerSocket.Tests/bin/Release/net10.0/WslcDockerSocket.Tests.dll -noLogo -parallelMode none -reporter verbose -stopOnFail
 ```
 
 The E2E test will not run unless both `WSLC_DOCKER_SOCKET_RUN_E2E=true` and the exact adapter `DOCKER_HOST` value are present. This prevents an accidental run against a locally installed Docker/Rancher engine.

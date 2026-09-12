@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.Options;
+using Microsoft.OpenApi;
 using WslcDockerSocket.Api;
 using WslcDockerSocket.Engine;
 using WslcDockerSocket.Hosting;
@@ -29,11 +30,26 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 });
 builder.Services.AddSingleton<WslcDockerEngine>().AddSingleton<DockerExecHijackConnectionHandler>();
 
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(options =>
+    options.SwaggerDoc("v1", new OpenApiInfo
+    {
+        Title = "WSLC Docker Socket API",
+        Version = "v1",
+        Description = "Docker Remote API compatibility surface backed by Microsoft WSL Containers.",
+    }));
+
 var app = builder.Build();
-var engine = app.Services.GetRequiredService<WslcDockerEngine>();
-app.Lifetime.ApplicationStopping.Register(engine.Dispose);
+
+app.Lifetime.ApplicationStopping.Register(app.Services.GetRequiredService<WslcDockerEngine>().Dispose);
 
 app.UseDockerApiExceptionHandler();
+app.UseSwagger();
+app.UseSwaggerUI(options =>
+{
+    options.DocumentTitle = "WSLC Docker Socket API";
+    options.SwaggerEndpoint("/swagger/v1/swagger.json", "WSLC Docker Socket API v1");
+});
 app.MapDockerApi();
 app.Run();
 

@@ -1,59 +1,45 @@
 namespace WslcDockerSocket.Engine;
 
-using Api.Contracts;
-using Microsoft.WSL.Containers;
-using Streaming;
+using System.Text;
 
-internal sealed class DockerExecState(string id, DockerContainerState container, DockerExecCreateRequest request)
+// This state is transient metadata for one Docker exec request, never container authority.
+internal sealed class DockerExecState(string id, string containerId, IReadOnlyList<string> command)
 {
-    private readonly TaskCompletionSource<IReadOnlyList<DockerOutputFrame>> _result =
-        new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private int _started;
+    private readonly Lock _sync = new();
+    private Task<WslcCommandResult>? _operation;
 
     public string Id { get; } = id;
-
-    public string ContainerId { get; } = container.Id;
-
-    public IReadOnlyList<string> Command { get; } = request.Cmd ?? [];
-
+    public string ContainerId { get; } = containerId;
+    public IReadOnlyList<string> Command { get; } = command;
     public bool Running { get; private set; }
+    public int? ExitCode { get; private set; }
 
-    public int ExitCode { get; private set; }
-
-    public async Task<IReadOnlyList<DockerOutputFrame>> StartAsync(CancellationToken ct)
+    public async Task<DockerExecResult> StartAsync(IWslcCommandRunner runner, CancellationToken ct)
     {
-        if (Interlocked.Exchange(ref _started, 1) != 0)
+        Task<WslcCommandResult> operation;
+        lock (_sync)
         {
-            return await _result.Task.WaitAsync(ct).ConfigureAwait(false);
+            if (_operation is not null)
+            {
+                operation = _operation;
+            }
+            else
+            {
+                Running = true;
+                _operation = runner.RunAsync(["container", "exec", ContainerId, .. Command], ct);
+                operation = _operation;
+            }
         }
 
-        Running = true;
-        using var process = container.CreateProcess(request);
-        var exited = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
-        void OnExited(int exitCode) => exited.TrySetResult(exitCode);
-        process.Exited += OnExited;
-        try
+        var result = await operation.ConfigureAwait(false);
+        lock (_sync)
         {
-            process.Start();
-            var stdout = DockerProcessOutput.ReadAsync(process, ProcessOutputHandle.StandardOutput, ct);
-            var stderr = DockerProcessOutput.ReadAsync(process, ProcessOutputHandle.StandardError, ct);
-            await Task.WhenAll(stdout, stderr).ConfigureAwait(false);
-            ExitCode = process.State is ProcessState.Exited or ProcessState.Signalled
-                ? process.ExitCode
-                : await exited.Task.WaitAsync(ct).ConfigureAwait(false);
-            var output = DockerStreams.FromStdoutAndStderr(await stdout.ConfigureAwait(false), await stderr.ConfigureAwait(false));
-            _result.TrySetResult(output);
-            return output;
-        }
-        catch (Exception exception)
-        {
-            _result.TrySetException(exception);
-            throw;
-        }
-        finally
-        {
-            process.Exited -= OnExited;
             Running = false;
+            ExitCode = result.ExitCode;
         }
+
+        return new DockerExecResult(Encoding.UTF8.GetBytes(result.StandardOutput), Encoding.UTF8.GetBytes(result.StandardError));
     }
 }
+
+internal readonly record struct DockerExecResult(byte[] StandardOutputBytes, byte[] StandardErrorBytes);

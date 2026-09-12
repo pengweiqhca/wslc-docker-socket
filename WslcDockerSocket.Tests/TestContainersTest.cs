@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using DotNet.Testcontainers.Builders;
+using Testcontainers.Kafka;
 using Testcontainers.Redis;
 
 namespace WslcDockerSocket.Tests;
@@ -13,15 +14,33 @@ public sealed class TestContainersTest
     [Fact]
     public async Task RedisTest()
     {
-        await using var redisContainer = new RedisBuilder("redis")
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var container = new RedisBuilder("redis")
             .WithDockerEndpoint(ExpectedDockerHost)
             .WithAutoRemove(true)
             .WithCleanUp(false)
             .Build();
 
-        await redisContainer.StartAsync(TestContext.Current.CancellationToken);
+        await container.StartAsync(ct);
 
-        Assert.NotNull(redisContainer.GetConnectionString());
+        using var client = new TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, container.GetMappedPublicPort(6379), ct);
+        Assert.True(client.Connected);
+    }
+
+    [Fact]
+    public async Task KafkaTest()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var container = new KafkaBuilder("confluentinc/cp-kafka:7.8.0")
+            .WithDockerEndpoint(ExpectedDockerHost)
+            .WithAutoRemove(true)
+            .WithCleanUp(false)
+            .Build();
+
+        await container.StartAsync(ct);
     }
 
     [Fact]
@@ -42,9 +61,10 @@ public sealed class TestContainersTest
             .WithWaitStrategy(Wait.ForUnixContainer()
                 .UntilMessageIsLogged("rocketmq-proxy startup successfully",
                     static options => options.WithTimeout(TimeSpan.FromMinutes(5)))
-                .UntilCommandIsCompleted(["sh", "-c", "./mqadmin clusterList -n 127.0.0.1:9876 | grep -q DefaultCluster"],
-                    static options => options.WithTimeout(TimeSpan.FromMinutes(3))
-                        .WithInterval(TimeSpan.FromSeconds(2))))
+                .UntilCommandIsCompleted(
+                    ["sh", "-c", "./mqadmin clusterList -n 127.0.0.1:9876 | grep -q DefaultCluster"],
+                    static options =>
+                        options.WithTimeout(TimeSpan.FromMinutes(3)).WithInterval(TimeSpan.FromSeconds(2))))
             .Build();
 
         await container.StartAsync(ct);

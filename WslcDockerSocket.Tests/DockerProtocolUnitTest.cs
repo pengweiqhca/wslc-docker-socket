@@ -1,7 +1,6 @@
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Primitives;
-using Microsoft.WSL.Containers;
 using WslcDockerSocket.Api;
 using WslcDockerSocket.Api.Contracts;
 using WslcDockerSocket.Engine;
@@ -50,6 +49,26 @@ public sealed class DockerProtocolUnitTest
 
         Assert.Contains("18080", JsonSerializer.Serialize(response["8080/tcp"]), StringComparison.Ordinal);
         Assert.Contains("28080", JsonSerializer.Serialize(response["8080/udp"]), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("0")]
+    public void UnspecifiedTcpHostPortIsAllocatedBeforeWslcPublish(string hostPort)
+    {
+        var binding = Assert.Single(DockerPortBinding.Parse(new Dictionary<string, List<DockerHostPortBinding>?>
+        {
+            ["8080/tcp"] = [new DockerHostPortBinding { HostPort = hostPort }],
+        }));
+
+        var publish = binding.ToWslcPublishArgument();
+        var separator = publish.IndexOf(':');
+
+        Assert.True(separator > 0);
+        Assert.True(ushort.TryParse(publish[..separator], out var allocatedPort));
+        Assert.NotEqual((ushort)0, allocatedPort);
+        Assert.Equal("8080", publish[(separator + 1)..]);
     }
 
     [Fact]

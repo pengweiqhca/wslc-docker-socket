@@ -76,15 +76,37 @@ public sealed class DockerApiContractTest(IHttpClientFactory factory)
     }
 
     [Fact]
-    public async Task UnsupportedEndpointReturnsDockerNotFoundPayload()
+    public async Task ArchiveUploadRequiresDestinationPath()
     {
         var ct = TestContext.Current.CancellationToken;
         using var response = await _client.SendAsync(
             new HttpRequestMessage(HttpMethod.Put, "/v1.43/containers/id/archive"),
             ct);
 
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        await AssertDockerErrorAsync(response, "Archive destination path is required", ct);
+    }
+
+    [Fact]
+    public async Task EventStreamReportsThatWslcHasNoEventSourceInsteadOfAnUnknownEndpoint()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var response = await _client.GetAsync("/v1.54/events", ct);
+
+        Assert.Equal(HttpStatusCode.NotImplemented, response.StatusCode);
+        await AssertDockerErrorAsync(response, "Event streaming is not supported", ct);
+    }
+
+    [Fact]
+    public async Task UnsupportedEndpointReturnsDockerNotFoundPayload()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var response = await _client.SendAsync(
+            new HttpRequestMessage(HttpMethod.Put, "/v1.43/unimplemented"),
+            ct);
+
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
-        await AssertDockerErrorAsync(response, "endpoint not implemented: PUT /v1.43/containers/id/archive", ct);
+        await AssertDockerErrorAsync(response, "endpoint not implemented: PUT /v1.43/unimplemented", ct);
     }
 
     private static async Task AssertDockerErrorAsync(HttpResponseMessage response, string expectedMessage, CancellationToken ct)

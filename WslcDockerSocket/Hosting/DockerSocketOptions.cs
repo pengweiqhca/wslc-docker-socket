@@ -14,7 +14,7 @@ internal sealed class DockerSocketOptions(ushort tcpPort, string namedPipe, bool
     {
         ArgumentNullException.ThrowIfNull(configuration);
 
-        var tcpPort = configuration.GetValue<ushort?>("WSLC_DOCKER_SOCKET_TCP_PORT") ?? 23750;
+        var tcpPort = configuration.GetValue<ushort?>("WSLC_DOCKER_SOCKET_TCP_PORT") ?? 2375;
         var namedPipe = configuration["WSLC_DOCKER_SOCKET_PIPE_NAME"] ?? "docker_engine";
         if (string.IsNullOrWhiteSpace(namedPipe))
         {
