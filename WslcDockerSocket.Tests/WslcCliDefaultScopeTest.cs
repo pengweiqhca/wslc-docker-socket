@@ -1,6 +1,5 @@
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Primitives;
-using System.Text.Json;
 using WslcDockerSocket.Api;
 using WslcDockerSocket.Api.Contracts;
 using WslcDockerSocket.Engine;
@@ -22,6 +21,21 @@ public sealed class WslcCliDefaultScopeTest
         Assert.Equal(["container", "list", "-a", "--format", "json"], Assert.Single(runner.Commands));
         AssertDefaultScope(runner);
     }
+
+    [Fact]
+    public void ConfiguredSessionIsSelectedBeforeTheSubcommand()
+    {
+        // wslc rejects --session after the subcommand, and an elevated token otherwise gets its own session.
+        Assert.Equal(["--session", "wslc-cli-demo", "container", "list", "-a", "--format", "json"],
+            WslcCommandRunner.BuildArguments(["container", "list", "-a", "--format", "json"], "wslc-cli-demo"));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void AnUnsetSessionLeavesTheCommandUnqualified(string? session) =>
+        Assert.Equal(["container", "list"], WslcCommandRunner.BuildArguments(["container", "list"], session));
 
     [Fact]
     public async Task ContainerCatalogReadsTheDockerAlignedListShape()
