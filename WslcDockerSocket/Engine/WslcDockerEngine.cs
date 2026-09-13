@@ -105,16 +105,13 @@ internal sealed class WslcDockerEngine : IDisposable
     public Task PullImageAsync(DockerImageReference image, string registryAuth, CancellationToken ct)
     {
         ThrowIfDisposed();
-        switch (ClassifyRegistryAuth(registryAuth))
+        return ClassifyRegistryAuth(registryAuth) switch
         {
-            case RegistryAuthKind.Malformed:
-                throw new DockerApiException(StatusCodes.Status400BadRequest, "X-Registry-Auth is invalid.");
-            case RegistryAuthKind.Credentialed:
-                throw new DockerApiException(StatusCodes.Status501NotImplemented,
-                    "Registry authentication is not supported by the WSLC Docker socket.");
-        }
-
-        return _imageCatalog.PullAsync(image.CanonicalName, ct);
+            RegistryAuthKind.Malformed => throw new DockerApiException(StatusCodes.Status400BadRequest, "X-Registry-Auth is invalid."),
+            RegistryAuthKind.Credentialed => throw new DockerApiException(StatusCodes.Status501NotImplemented,
+                                "Registry authentication is not supported by the WSLC Docker socket."),
+            _ => _imageCatalog.PullAsync(image.CanonicalName, ct),
+        };
     }
 
     public async Task<string> CreateContainerAsync(string requestedName, DockerCreateContainerRequest request, CancellationToken ct)
@@ -691,7 +688,7 @@ internal sealed class WslcDockerEngine : IDisposable
             throw new DockerApiException(StatusCodes.Status400BadRequest, "Archive destination path is required.");
         }
 
-        if (!path.StartsWith("/", StringComparison.Ordinal) || path.Any(char.IsControl))
+        if (!path.StartsWith('/') || path.Any(char.IsControl))
         {
             throw new DockerApiException(StatusCodes.Status400BadRequest,
                 "Archive destination path must be an absolute Unix path without control characters.");

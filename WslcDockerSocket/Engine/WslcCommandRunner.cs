@@ -200,7 +200,7 @@ internal sealed class WslcCommandRunner(string? session = null) : IWslcCommandRu
                     lockTaken = true;
                     if (!ct.IsCancellationRequested && !forwardingFailure.Task.IsCompleted)
                     {
-                        await writeFrameAsync(new DockerOutputFrame(stream, buffer[..read].ToArray()), ct).ConfigureAwait(false);
+                        await writeFrameAsync(new DockerOutputFrame(stream, [.. buffer[..read]]), ct).ConfigureAwait(false);
                     }
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
