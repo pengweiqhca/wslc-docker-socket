@@ -79,7 +79,26 @@ internal sealed class WslcDockerEngine : IDisposable
         };
     }
 
-    public Task<IReadOnlyList<JsonElement>> ListImagesAsync(CancellationToken ct) => _imageCatalog.ListAsync(ct);
+    public async Task<IReadOnlyList<JsonElement>> ListImagesAsync(IQueryCollection query, CancellationToken ct)
+    {
+        var filters = DockerFilters.FromQuery(query, "label", "reference", "dangling");
+        var images = await _imageCatalog.ListAsync(ct).ConfigureAwait(false);
+        return filters.IsEmpty ? images : [.. images.Where(image => MatchesImage(image, filters))];
+    }
+
+    private static bool MatchesImage(JsonElement image, DockerFilters filters)
+    {
+        var tags = image.TryGetProperty("RepoTags", out var repoTags) && repoTags.ValueKind == JsonValueKind.Array
+            ? repoTags.EnumerateArray().Where(tag => tag.ValueKind == JsonValueKind.String)
+                .Select(tag => tag.GetString() ?? string.Empty).ToArray()
+            : [];
+        // Docker treats an image with no repository tag as dangling.
+        if (!filters.MatchesBoolean("dangling", tags.Length == 0)) return false;
+        if (!filters.MatchesLabels(image.TryGetProperty("Labels", out var labels) ? labels : default)) return false;
+        var references = filters.Values("reference");
+        return references.Count == 0
+               || references.Any(reference => tags.Any(tag => DockerImageReference.Parse(reference).Matches(tag)));
+    }
 
     public Task<JsonElement> InspectImageAsync(string image, CancellationToken ct) => _imageCatalog.InspectAsync(image, ct);
 
@@ -206,25 +225,77 @@ internal sealed class WslcDockerEngine : IDisposable
 
     public Task<JsonElement> InspectContainerAsync(string id, CancellationToken ct) => _containerCatalog.InspectAsync(id, ct);
 
-    public async Task<object> ListVolumesAsync(CancellationToken ct) => new
+    public async Task<object> ListVolumesAsync(IQueryCollection query, CancellationToken ct) => new
     {
-        Volumes = await _resourceCatalog.ListAndInspectAsync("volume", ct).ConfigureAwait(false),
+        Volumes = Filter(await _resourceCatalog.ListAndInspectAsync("volume", ct).ConfigureAwait(false),
+            DockerFilters.FromQuery(query, "label", "name", "driver")),
         Warnings = Array.Empty<string>(),
     };
 
+    private static IReadOnlyList<JsonElement> Filter(IReadOnlyList<JsonElement> resources, DockerFilters filters)
+    {
+        if (filters.IsEmpty) return resources;
+        return
+        [
+            .. resources.Where(resource =>
+                filters.MatchesLabels(resource.TryGetProperty("Labels", out var labels) ? labels : default)
+                && filters.MatchesSubstring("name", ReadResourceString(resource, "Name"))
+                && filters.MatchesExact("driver", ReadResourceString(resource, "Driver"))
+                && filters.MatchesIdPrefix("id", ReadResourceString(resource, "Id"))),
+        ];
+    }
+
+    private static string? ReadResourceString(JsonElement resource, string name) =>
+        resource.ValueKind == JsonValueKind.Object && resource.TryGetProperty(name, out var value)
+        && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
     public Task<JsonElement> InspectVolumeAsync(string name, CancellationToken ct) => _resourceCatalog.InspectAsync("volume", name, ct);
-    public Task<IReadOnlyList<JsonElement>> ListNetworksAsync(CancellationToken ct) => _resourceCatalog.ListAndInspectAsync("network", ct);
+
+    public Task DeleteVolumeAsync(string name, CancellationToken ct)
+    {
+        ThrowIfDisposed();
+        return _resourceCatalog.RemoveAsync("volume", name, ct);
+    }
+
+    public Task DeleteNetworkAsync(string idOrName, CancellationToken ct)
+    {
+        ThrowIfDisposed();
+        return _resourceCatalog.RemoveAsync("network", idOrName, ct);
+    }
+
+    public Task<IReadOnlyList<object>> DeleteImageAsync(string image, bool force, bool noPrune, CancellationToken ct)
+    {
+        ThrowIfDisposed();
+        return _imageCatalog.RemoveAsync(image, force, noPrune, ct);
+    }
+    public async Task<IReadOnlyList<JsonElement>> ListNetworksAsync(IQueryCollection query, CancellationToken ct) =>
+        Filter(await _resourceCatalog.ListAndInspectAsync("network", ct).ConfigureAwait(false),
+            DockerFilters.FromQuery(query, "label", "name", "driver", "id"));
     public Task<JsonElement> InspectNetworkAsync(string idOrName, CancellationToken ct) => _resourceCatalog.InspectAsync("network", idOrName, ct);
 
     public async Task<IReadOnlyList<object>> ListContainersAsync(IQueryCollection query, CancellationToken ct)
     {
         var includeStopped = string.Equals(query["all"], "1", StringComparison.Ordinal)
                              || string.Equals(query["all"], "true", StringComparison.OrdinalIgnoreCase);
+        var filters = DockerFilters.FromQuery(query, "label", "id", "name", "status");
         var containers = await _containerCatalog.ListAsync(ct).ConfigureAwait(false);
-        var visible = containers.Where(container => includeStopped || container.DockerState == "running").ToList();
+        var visible = containers
+            .Where(container => includeStopped || container.DockerState == "running")
+            .Where(container => filters.MatchesIdPrefix("id", container.Id)
+                                && filters.MatchesSubstring("name", container.Name)
+                                && filters.MatchesExact("status", container.DockerState))
+            .ToList();
         var inspected = await _containerCatalog.InspectManyAsync([.. visible.Select(container => container.Id)], ct)
             .ConfigureAwait(false);
-        return [.. visible.Select(container => ToListResponse(container, inspected))];
+        // Labels are only available from inspect, so label filters are applied after the details are read.
+        return
+        [
+            .. visible.Select(container => (Container: container, Detail: Detail(container, inspected)))
+                .Where(entry => filters.MatchesLabels(ToListLabels(entry.Detail)))
+                .Select(entry => ToListResponse(entry.Container, inspected)),
+        ];
     }
 
     public async Task<DockerExecState> CreateExecAsync(string containerId, DockerExecCreateRequest request, CancellationToken ct)
@@ -427,16 +498,21 @@ internal sealed class WslcDockerEngine : IDisposable
         return value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out exitCode);
     }
 
+    private static JsonElement Detail(WslcCatalogContainer container,
+        IReadOnlyDictionary<string, JsonElement> inspected) =>
+        inspected.TryGetValue(container.Id, out var detail) ? detail : default;
+
     private static object ToListResponse(WslcCatalogContainer container,
         IReadOnlyDictionary<string, JsonElement> inspected)
     {
-        inspected.TryGetValue(container.Id, out var detail);
+        var detail = Detail(container, inspected);
         return new
         {
             container.Id,
             Names = new[] { "/" + container.Name.TrimStart('/') },
-            container.Image,
-            ImageID = container.Image,
+            // Docker reports the reference the container was created from, and the image digest separately.
+            Image = ReadConfigString(detail, "Image") ?? container.Image,
+            ImageID = ReadString(detail, "Image") ?? container.Image,
             Command = ToListCommand(detail),
             Created = container.CreatedAt,
             State = container.DockerState,
@@ -530,7 +606,12 @@ internal sealed class WslcDockerEngine : IDisposable
             ? networks
             : EmptyJsonObject;
 
-    private static string ReadString(JsonElement element, string name) =>
+    private static string? ReadConfigString(JsonElement detail, string name) =>
+        detail.ValueKind == JsonValueKind.Object && detail.TryGetProperty("Config", out var config)
+            ? ReadString(config, name) is { Length: > 0 } value ? value : null
+            : null;
+
+    private static string? ReadString(JsonElement element, string name) =>
         element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out var value)
         && value.ValueKind == JsonValueKind.String
             ? value.GetString() ?? string.Empty

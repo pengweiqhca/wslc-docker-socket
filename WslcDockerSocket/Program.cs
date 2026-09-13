@@ -10,6 +10,8 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Configuration.AddJsonFile("appsettings.user.json", optional: true, reloadOnChange: true);
 
+builder.Host.UseWindowsService(options => options.ServiceName = "wslc-docker-socket");
+
 var socketOptions = DockerSocketOptions.From(builder.Configuration);
 
 var hyperVTcpAddress = socketOptions.DisableHyperVTcp
@@ -41,7 +43,9 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.PropertyNamingPolicy = null;
     options.SerializerOptions.PropertyNameCaseInsensitive = true;
 });
-builder.Services.AddSingleton<WslcDockerEngine>().AddSingleton<DockerExecHijackConnectionHandler>();
+builder.Services.AddSingleton(provider => new WslcDockerEngine(new WslcCommandRunner(socketOptions.Session),
+    new WslRuntimeDiagnosticsProvider(), provider.GetRequiredService<DockerSocketMountAdvertisement>()));
+builder.Services.AddSingleton<DockerExecHijackConnectionHandler>();
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>

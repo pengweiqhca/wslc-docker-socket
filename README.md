@@ -67,6 +67,7 @@ $env:DOCKER_HOST = 'npipe://./pipe/my-pipe-name'
 | `WSLC_DOCKER_SOCKET_DISABLE_HYPERV_TCP` | `false` | Set `true` to turn off the additional TCP listener on the Hyper-V virtual-switch host IP that WSLC containers can reach. |
 | `WSLC_DOCKER_SOCKET_HYPERV_TCP_ADDRESS` | auto-detected | Overrides Hyper-V host IP detection unless `WSLC_DOCKER_SOCKET_DISABLE_HYPERV_TCP=true`. |
 | `WSLC_DOCKER_SOCKET_TCP_PORT` | `2375` | TCP port, used only when TCP is enabled. |
+| `WSLC_DOCKER_SOCKET_SESSION` | `wslc-cli-{account}` | WSLC session every command runs in. Set it empty to let wslc pick the session for the current process. |
 
 Settings can be supplied as environment variables, command-line switches, or an optional `appsettings.user.json` beside the executable, which is reloaded when it changes.
 
@@ -136,7 +137,9 @@ Unknown endpoints return Docker's `404` shape with `endpoint not implemented: <m
 
 ## How it maps onto WSLC
 
-All state comes from the `wslc` CLI in its default, unqualified scope; the adapter never passes `--session`.
+All state comes from the `wslc` CLI.
+
+**Sessions.** wslc derives its default session name from the account *and* the elevation level, so an elevated process gets a separate `wslc-cli-admin-<account>` session with its own containers. Every command therefore selects a session explicitly, defaulting to `wslc-cli-<account>`, which keeps the adapter on one session whether or not it runs elevated. `--session` is passed before the subcommand, since wslc rejects it afterwards. Two limits are worth knowing: wslc only *selects* an existing session and never creates one (a missing session fails with `WSLC_E_SESSION_NOT_FOUND`), so the adapter first runs a read-only command without the session to bring the current token's default session up and then retries; and an unelevated process cannot attach to an elevated session at all, which fails with `ERROR_ELEVATION_REQUIRED`.
 
 **CLI output is a moving target.** WSLC 2.9.10 aligned `wslc container list --format json` with Docker's CLI: `Id` became `ID`, `Name` became `Names`, `State` and `CreatedAt` became text, and IDs are now abbreviated while `container create` and inspect still report the full digest. The list reader accepts both shapes, and identifiers are matched on a prefix in either direction so short and full IDs both resolve. Expect to re-verify against a real installation after every WSLC upgrade; fake-driven tests cannot detect this kind of drift.
 

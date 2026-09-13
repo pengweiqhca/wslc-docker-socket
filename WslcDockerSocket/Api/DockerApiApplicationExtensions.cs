@@ -106,8 +106,8 @@ internal static partial class DockerApiApplicationExtensions
                 Results.Json(await engine.GetInfoAsync(ct).ConfigureAwait(false)));
 
         app.MapGet("/images/json",
-            async (WslcDockerEngine engine, CancellationToken ct) =>
-                Results.Json(await engine.ListImagesAsync(ct).ConfigureAwait(false)));
+            async (HttpContext context, WslcDockerEngine engine, CancellationToken ct) =>
+                Results.Json(await engine.ListImagesAsync(context.Request.Query, ct).ConfigureAwait(false)));
         // Repository names may contain slashes, so image subresources are matched on the catch-all segment.
         app.MapGet("/images/{**image}",
             async (string image, HttpContext context, WslcDockerEngine engine, CancellationToken ct) =>
@@ -179,22 +179,34 @@ internal static partial class DockerApiApplicationExtensions
                 "Event streaming is not supported by the WSLC Docker socket because WSLC provides no event source."));
 
         app.MapGet("/volumes",
-            async (WslcDockerEngine engine, CancellationToken ct) =>
-                Results.Json(await engine.ListVolumesAsync(ct).ConfigureAwait(false)));
+            async (HttpContext context, WslcDockerEngine engine, CancellationToken ct) =>
+                Results.Json(await engine.ListVolumesAsync(context.Request.Query, ct).ConfigureAwait(false)));
         app.MapGet("/volumes/{name}",
             async (string name, WslcDockerEngine engine, CancellationToken ct) =>
                 Results.Json(await engine.InspectVolumeAsync(name, ct).ConfigureAwait(false)));
         app.MapGet("/networks",
-            async (WslcDockerEngine engine, CancellationToken ct) =>
-                Results.Json(await engine.ListNetworksAsync(ct).ConfigureAwait(false)));
+            async (HttpContext context, WslcDockerEngine engine, CancellationToken ct) =>
+                Results.Json(await engine.ListNetworksAsync(context.Request.Query, ct).ConfigureAwait(false)));
         app.MapGet("/networks/{id}",
             async (string id, WslcDockerEngine engine, CancellationToken ct) =>
                 Results.Json(await engine.InspectNetworkAsync(id, ct).ConfigureAwait(false)));
         app.MapPost("/networks/create",
             () => DockerResults.Error(StatusCodes.Status501NotImplemented,
                 "Custom Docker networks are not supported by the WSLC Docker socket yet."));
-        app.MapDelete("/networks/{id}",
-            (string id) => DockerResults.Error(StatusCodes.Status404NotFound, $"No such network: {id}"));
+        app.MapDelete("/networks/{id}", async (string id, WslcDockerEngine engine, CancellationToken ct) =>
+        {
+            await engine.DeleteNetworkAsync(id, ct).ConfigureAwait(false);
+            return Results.StatusCode(StatusCodes.Status204NoContent);
+        });
+        app.MapDelete("/volumes/{name}", async (string name, WslcDockerEngine engine, CancellationToken ct) =>
+        {
+            await engine.DeleteVolumeAsync(name, ct).ConfigureAwait(false);
+            return Results.StatusCode(StatusCodes.Status204NoContent);
+        });
+        app.MapDelete("/images/{**image}", async (string image, HttpContext context, WslcDockerEngine engine,
+            CancellationToken ct) => Results.Json(await engine.DeleteImageAsync(image,
+            DockerQuery.ReadBoolean(context.Request.Query, "force", false),
+            DockerQuery.ReadBoolean(context.Request.Query, "noprune", false), ct).ConfigureAwait(false)));
 
         app.MapGet("/{**path}", DockerResults.NotImplemented);
         app.MapPost("/{**path}", DockerResults.NotImplemented);

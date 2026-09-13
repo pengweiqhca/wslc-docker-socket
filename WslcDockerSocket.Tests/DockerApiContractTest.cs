@@ -55,14 +55,17 @@ public sealed class DockerApiContractTest(IHttpClientFactory factory)
         await AssertDockerErrorAsync(response, message, ct);
     }
 
-    [Fact]
-    public async Task NetworkDeletionReportsThatTheNetworkDoesNotExist()
+    [Theory]
+    [InlineData("/v1.43/networks/not-created", "No such network: not-created")]
+    [InlineData("/v1.43/volumes/not-created", "No such volume: not-created")]
+    [InlineData("/v1.43/images/not-created", "No such image: not-created")]
+    public async Task DeletingAMissingResourceReportsThatItDoesNotExist(string path, string message)
     {
         var ct = TestContext.Current.CancellationToken;
-        using var response = await _client.DeleteAsync("/v1.43/networks/not-created", ct);
+        using var response = await _client.DeleteAsync(path, ct);
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
-        await AssertDockerErrorAsync(response, "No such network: not-created", ct);
+        await AssertDockerErrorAsync(response, message, ct);
     }
 
     [Fact]

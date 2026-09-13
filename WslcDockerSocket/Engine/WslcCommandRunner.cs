@@ -20,9 +20,11 @@ internal interface IWslcCommandRunner
 
 internal readonly record struct WslcCommandResult(string StandardOutput, string StandardError, int ExitCode);
 
-internal sealed class WslcCommandRunner : IWslcCommandRunner
+internal sealed class WslcCommandRunner(string? session = null) : IWslcCommandRunner
 {
     private const string ExecutablePath = "wslc";
+    // wslc reports a missing session by name; it selects an existing session and never creates one.
+    private const string SessionNotFound = "WSLC_E_SESSION_NOT_FOUND";
     private const int MaximumOutputCharacters = 16 * 1024 * 1024;
     private const int StreamingBufferBytes = 81920;
 
@@ -38,7 +40,30 @@ internal sealed class WslcCommandRunner : IWslcCommandRunner
         await WslcSessionGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            using var process = Start(command);
+            var result = await ExecuteAsync(BuildArguments(command, session), ct).ConfigureAwait(false);
+            if (!IndicatesMissingSession(result)) return result;
+
+            // wslc only ever selects an existing session, so the configured one is brought up by running a
+            // read-only command without it first. The requested command is never retried unqualified: a
+            // mutation would then run in the wrong session.
+            await ExecuteAsync(["container", "list", "--format", "json"], ct).ConfigureAwait(false);
+            return await ExecuteAsync(BuildArguments(command, session), ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            WslcSessionGate.Release();
+        }
+    }
+
+    private bool IndicatesMissingSession(WslcCommandResult result) =>
+        !string.IsNullOrWhiteSpace(session)
+        && result.ExitCode != 0
+        && result.StandardError.Contains(SessionNotFound, StringComparison.OrdinalIgnoreCase);
+
+    private static async Task<WslcCommandResult> ExecuteAsync(IReadOnlyList<string> arguments, CancellationToken ct)
+    {
+        {
+            using var process = Start(arguments);
             var standardOutput = ReadBoundedAsync(process.StandardOutput);
             var standardError = ReadBoundedAsync(process.StandardError);
             try
@@ -63,10 +88,6 @@ internal sealed class WslcCommandRunner : IWslcCommandRunner
 
             return new WslcCommandResult(output.Value, error.Value, process.ExitCode);
         }
-        finally
-        {
-            WslcSessionGate.Release();
-        }
     }
 
     public async Task<WslcCommandResult> RunWithStandardInputAsync(IReadOnlyList<string> command, Stream input, CancellationToken ct)
@@ -76,7 +97,7 @@ internal sealed class WslcCommandRunner : IWslcCommandRunner
         await WslcSessionGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            using var process = Start(command, redirectStandardInput: true);
+            using var process = Start(BuildArguments(command, session), redirectStandardInput: true);
             var standardOutput = ReadBoundedAsync(process.StandardOutput);
             var standardError = ReadBoundedAsync(process.StandardError);
             try
@@ -122,7 +143,7 @@ internal sealed class WslcCommandRunner : IWslcCommandRunner
     {
         ArgumentNullException.ThrowIfNull(command);
         ArgumentNullException.ThrowIfNull(writeFrameAsync);
-        using var process = Start(command);
+        using var process = Start(BuildArguments(command, session));
         using var writeGate = new SemaphoreSlim(1, 1);
         var forwardingFailure = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
         var standardOutput = PumpAsync(process.StandardOutput.BaseStream, DockerStreamType.Stdout, writeFrameAsync,
@@ -277,6 +298,14 @@ internal sealed class WslcCommandRunner : IWslcCommandRunner
             // The process exited between the check and Kill.
         }
     }
+
+    /// <summary>
+    /// Prefixes the configured session. <c>--session</c> is a global option, so wslc only accepts it before the
+    /// subcommand. Selecting a session explicitly keeps the adapter on one session regardless of whether the
+    /// process is elevated, because wslc otherwise derives a separate session name for an elevated token.
+    /// </summary>
+    internal static IReadOnlyList<string> BuildArguments(IReadOnlyList<string> command, string? session) =>
+        string.IsNullOrWhiteSpace(session) ? command : ["--session", session, .. command];
 
     private static ProcessStartInfo CreateStartInfo(IReadOnlyList<string> command, bool redirectStandardInput = false)
     {

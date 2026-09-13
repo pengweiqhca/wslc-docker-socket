@@ -2,28 +2,31 @@ namespace WslcDockerSocket.Hosting;
 
 using System.Net;
 
-internal sealed class DockerSocketOptions(ushort tcpPort, string namedPipe, bool disableNamedPipe, bool enableTcp,
-    bool disableHyperVTcp, string? hyperVTcpAddress)
+internal sealed class DockerSocketOptions
 {
-    public ushort TcpPort { get; } = tcpPort;
+    /// <summary>
+    /// The WSLC session every command runs in. It defaults to the session name wslc derives for the current account, so an elevated adapter stays on the same session as an unelevated one instead of getting the separate <c>wslc-cli-admin-*</c> session wslc picks for an elevated token. Set it empty to let wslc choose the session for the current process.
+    /// </summary>
+    public required string Session { get; init; }
 
-    public string NamedPipe { get; } = namedPipe;
+    public required ushort TcpPort { get; init; }
 
-    public bool DisableNamedPipe { get; } = disableNamedPipe;
+    public required string NamedPipe { get; init; }
 
-    public bool EnableTcp { get; } = enableTcp;
+    public required bool DisableNamedPipe { get; init; }
+
+    public required bool EnableTcp { get; init; }
 
     /// <summary>Whether the additional listener on the Hyper-V virtual switch adapter address is turned off.</summary>
-    public bool DisableHyperVTcp { get; } = disableHyperVTcp;
+    public required bool DisableHyperVTcp { get; init; }
 
     /// <summary>Overrides auto-detection of the Hyper-V virtual switch adapter address.</summary>
-    public string? HyperVTcpAddress { get; } = hyperVTcpAddress;
+    public string? HyperVTcpAddress { get; init; }
 
     public static DockerSocketOptions From(IConfiguration configuration)
     {
         ArgumentNullException.ThrowIfNull(configuration);
 
-        var tcpPort = configuration.GetValue<ushort?>("WSLC_DOCKER_SOCKET_TCP_PORT") ?? 2375;
         var namedPipe = configuration["WSLC_DOCKER_SOCKET_PIPE_NAME"] ?? "docker_engine";
         if (string.IsNullOrWhiteSpace(namedPipe))
         {
@@ -57,6 +60,15 @@ internal sealed class DockerSocketOptions(ushort tcpPort, string namedPipe, bool
                 "At least one listener must be enabled. Set WSLC_DOCKER_SOCKET_ENABLE_TCP=true, WSLC_DOCKER_SOCKET_DISABLE_HYPERV_TCP=false, or enable the named pipe.");
         }
 
-        return new DockerSocketOptions(tcpPort, namedPipe, disableNamedPipe, enableTcp, disableHyperVTcp, hyperVTcpAddress);
+        return new DockerSocketOptions
+        {
+            NamedPipe = namedPipe,
+            DisableNamedPipe = disableNamedPipe,
+            TcpPort = configuration.GetValue<ushort?>("WSLC_DOCKER_SOCKET_TCP_PORT") ?? 2375,
+            EnableTcp = enableTcp,
+            DisableHyperVTcp = disableHyperVTcp,
+            HyperVTcpAddress = hyperVTcpAddress,
+            Session = configuration["WSLC_DOCKER_SOCKET_SESSION"] ?? $"wslc-cli-{Environment.UserName}",
+        };
     }
 }

@@ -37,6 +37,29 @@ internal sealed class WslcCliResourceCatalog(IWslcCommandRunner runner)
         return await InspectAsync(resource, match, ct).ConfigureAwait(false);
     }
 
+    /// <summary>Removes a volume or network, resolving it first so Docker's 404 and 409 semantics are preserved.</summary>
+    public async Task RemoveAsync(string resource, string idOrName, CancellationToken ct)
+    {
+        var match = await ResolveAsync(resource, idOrName, ct).ConfigureAwait(false);
+        await RunAsync([resource, "remove", match.Name], ct).ConfigureAwait(false);
+    }
+
+    private async Task<WslcCatalogResource> ResolveAsync(string resource, string idOrName, CancellationToken ct)
+    {
+        var matches = (await ListAsync(resource, ct).ConfigureAwait(false))
+            .Where(candidate => candidate.Id.StartsWith(idOrName, StringComparison.OrdinalIgnoreCase)
+                || idOrName.StartsWith(candidate.Id, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(candidate.Name, idOrName, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        return matches.Length switch
+        {
+            0 => throw new DockerApiException(StatusCodes.Status404NotFound, $"No such {resource}: {idOrName}"),
+            1 => matches[0],
+            _ => throw new DockerApiException(StatusCodes.Status409Conflict,
+                $"{resource} identifier '{idOrName}' is ambiguous."),
+        };
+    }
+
     private async Task<IReadOnlyList<WslcCatalogResource>> ListAsync(string resource, CancellationToken ct)
     {
         var result = await RunAsync([resource, "list", "--format", "json"], ct).ConfigureAwait(false);

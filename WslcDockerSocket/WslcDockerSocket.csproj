@@ -11,6 +11,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="WslcDockerSocket.Tests" />
 
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
     <PackageReference Include="Swashbuckle.AspNetCore" />
     <PackageReference Include="System.Management" />
   </ItemGroup>

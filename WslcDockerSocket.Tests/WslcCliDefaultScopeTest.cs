@@ -1,5 +1,5 @@
 using Microsoft.AspNetCore.Http;
-using System.Text.Json;
+using Microsoft.Extensions.Primitives;
 using WslcDockerSocket.Api;
 using WslcDockerSocket.Api.Contracts;
 using WslcDockerSocket.Engine;
@@ -21,6 +21,21 @@ public sealed class WslcCliDefaultScopeTest
         Assert.Equal(["container", "list", "-a", "--format", "json"], Assert.Single(runner.Commands));
         AssertDefaultScope(runner);
     }
+
+    [Fact]
+    public void ConfiguredSessionIsSelectedBeforeTheSubcommand()
+    {
+        // wslc rejects --session after the subcommand, and an elevated token otherwise gets its own session.
+        Assert.Equal(["--session", "wslc-cli-demo", "container", "list", "-a", "--format", "json"],
+            WslcCommandRunner.BuildArguments(["container", "list", "-a", "--format", "json"], "wslc-cli-demo"));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void AnUnsetSessionLeavesTheCommandUnqualified(string? session) =>
+        Assert.Equal(["container", "list"], WslcCommandRunner.BuildArguments(["container", "list"], session));
 
     [Fact]
     public async Task ContainerCatalogReadsTheDockerAlignedListShape()
@@ -62,6 +77,50 @@ public sealed class WslcCliDefaultScopeTest
     }
 
     [Fact]
+    public async Task ContainerListAppliesLabelFiltersInsteadOfReturningEveryContainer()
+    {
+        // Testcontainers' reaper selects by its own session label and then deletes what it is given, so an
+        // unfiltered superset would destroy unrelated containers.
+        var runner = new RecordingRunner(command => command.SequenceEqual(["container", "list", "-a", "--format", "json"])
+            ? new WslcCommandResult(
+                "{\"CreatedAt\":\"2026-09-12 20:22:55 +0800 GMT+8\",\"ID\":\"aaaa11112222\",\"Image\":\"redis\",\"Names\":\"owned\",\"State\":\"running\"}\n"
+                + "{\"CreatedAt\":\"2026-09-12 20:22:55 +0800 GMT+8\",\"ID\":\"bbbb33334444\",\"Image\":\"mysql\",\"Names\":\"unrelated\",\"State\":\"running\"}",
+                string.Empty,
+                0)
+            : new WslcCommandResult(
+                "[{\"Id\":\"aaaa11112222\",\"Labels\":{\"org.testcontainers.session-id\":\"session-1\"}},"
+                + "{\"Id\":\"bbbb33334444\",\"Labels\":{\"com.example.other\":\"yes\"}}]",
+                string.Empty,
+                0));
+        using var engine = new WslcDockerEngine(runner, new WslRuntimeDiagnosticsProvider());
+
+        var matching = await engine.ListContainersAsync(
+            new QueryCollection(new Dictionary<string, StringValues>
+            {
+                ["all"] = "1",
+                ["filters"] = """{"label":["org.testcontainers.session-id=session-1"]}""",
+            }),
+            TestContext.Current.CancellationToken);
+
+        var listed = JsonSerializer.SerializeToElement(Assert.Single(matching));
+        Assert.Equal("/owned", listed.GetProperty("Names")[0].GetString());
+    }
+
+    [Fact]
+    public async Task ContainerListRejectsFiltersItCannotApply()
+    {
+        var runner = new RecordingRunner(new WslcCommandResult(string.Empty, string.Empty, 0));
+        using var engine = new WslcDockerEngine(runner, new WslRuntimeDiagnosticsProvider());
+
+        var exception = await Assert.ThrowsAsync<DockerApiException>(() => engine.ListContainersAsync(
+            new QueryCollection(new Dictionary<string, StringValues> { ["filters"] = """{"before":["x"]}""" }),
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(StatusCodes.Status501NotImplemented, exception.StatusCode);
+        Assert.Empty(runner.Commands);
+    }
+
+    [Fact]
     public async Task ContainerListReportsLabelsAndCommandFromInspect()
     {
         var runner = new RecordingRunner(command => command.SequenceEqual(["container", "list", "-a", "--format", "json"])
@@ -70,8 +129,8 @@ public sealed class WslcCliDefaultScopeTest
                 string.Empty,
                 0)
             : new WslcCommandResult(
-                "[{\"Id\":\"19c58a00a160\",\"Labels\":{\"com.docker.compose.project\":\"demo\"},"
-                + "\"Config\":{\"Entrypoint\":[\"docker-entrypoint.sh\"],\"Cmd\":[\"mysqld\"]}}]",
+                "[{\"Id\":\"19c58a00a160\",\"Image\":\"sha256:21ed0f5cc494\",\"Labels\":{\"com.docker.compose.project\":\"demo\"},"
+                + "\"Config\":{\"Image\":\"mysql:latest\",\"Entrypoint\":[\"docker-entrypoint.sh\"],\"Cmd\":[\"mysqld\"]}}]",
                 string.Empty,
                 0));
         using var engine = new WslcDockerEngine(runner, new WslRuntimeDiagnosticsProvider());
@@ -80,6 +139,9 @@ public sealed class WslcCliDefaultScopeTest
         var container = JsonSerializer.SerializeToElement(listed);
 
         Assert.Equal("demo", container.GetProperty("Labels").GetProperty("com.docker.compose.project").GetString());
+        // Docker reports the created-from reference and the image digest separately.
+        Assert.Equal("mysql:latest", container.GetProperty("Image").GetString());
+        Assert.Equal("sha256:21ed0f5cc494", container.GetProperty("ImageID").GetString());
         Assert.Equal("docker-entrypoint.sh mysqld", container.GetProperty("Command").GetString());
         Assert.Equal("Up 3 minutes", container.GetProperty("Status").GetString());
         Assert.Equal("running", container.GetProperty("State").GetString());
