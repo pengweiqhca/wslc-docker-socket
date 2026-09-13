@@ -75,7 +75,13 @@ internal sealed class WslcCliImageCatalog(IWslcCommandRunner runner)
         if (element.ValueKind != JsonValueKind.Object) return;
         var id = GetOptionalString(element, "Id") ?? GetOptionalString(element, "ID");
         if (string.IsNullOrWhiteSpace(id)) return;
-        images.Add(new InspectedImage(RemoveSha256Prefix(id), GetOptionalInt64(element, "Size"), ReadCreatedSeconds(element)));
+        // Labels live on the image config and are needed for Docker's label filters.
+        var labels = TryGetProperty(element, "Config", out var config) && config.ValueKind == JsonValueKind.Object
+                     && TryGetProperty(config, "Labels", out var value) && value.ValueKind == JsonValueKind.Object
+            ? value.Clone()
+            : default;
+        images.Add(new InspectedImage(RemoveSha256Prefix(id), GetOptionalInt64(element, "Size"),
+            ReadCreatedSeconds(element), labels));
     }
 
     /// <summary>Overlays exact inspect values, keeping WSLC's rendered list values when inspect omits them.</summary>
@@ -88,7 +94,7 @@ internal sealed class WslcCliImageCatalog(IWslcCommandRunner runner)
         var listedId = RemoveSha256Prefix(id);
         var match = inspected.FirstOrDefault(image => image.Id.StartsWith(listedId, StringComparison.OrdinalIgnoreCase)
             || listedId.StartsWith(image.Id, StringComparison.OrdinalIgnoreCase));
-        if (match is null || (match.Size is null && match.Created <= 0)) return summary;
+        if (match is null) return summary;
 
         var node = JsonNode.Parse(summary.GetRawText()) as JsonObject ?? throw InvalidResponse("image list");
         if (match.Size is { } size)
@@ -98,10 +104,11 @@ internal sealed class WslcCliImageCatalog(IWslcCommandRunner runner)
         }
 
         if (match.Created > 0) node["Created"] = match.Created;
+        if (match.Labels.ValueKind == JsonValueKind.Object) node["Labels"] = JsonNode.Parse(match.Labels.GetRawText());
         return JsonSerializer.SerializeToElement(node);
     }
 
-    private sealed record InspectedImage(string Id, long? Size, long Created);
+    private sealed record InspectedImage(string Id, long? Size, long Created, JsonElement Labels);
 
     private async Task<IReadOnlyList<JsonElement>> ListSummariesAsync(CancellationToken ct)
     {
@@ -185,6 +192,44 @@ internal sealed class WslcCliImageCatalog(IWslcCommandRunner runner)
     private static string RemoveSha256Prefix(string value) => value.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase)
         ? value["sha256:".Length..]
         : value;
+
+    /// <summary>
+    /// Removes an image and reports Docker's delete response. Only the requested image is reported: WSLC does
+    /// not say which untagged parent layers it also removed, so none are invented.
+    /// </summary>
+    public async Task<IReadOnlyList<object>> RemoveAsync(string image, bool force, bool noPrune, CancellationToken ct)
+    {
+        // Resolve only to reproduce Docker's 404, then hand WSLC the caller's own reference: removing by id
+        // would delete the image outright, where Docker untags a reference that other tags still share.
+        var imageId = await ResolveImageIdAsync(image, ct).ConfigureAwait(false);
+        var command = new List<string> { "image", "remove" };
+        if (force) command.Add("--force");
+        if (noPrune) command.Add("--no-prune");
+        command.Add(image);
+        var result = await RunAsync(command, ct).ConfigureAwait(false);
+        var deleted = ReadDeleteReport(result.StandardOutput);
+        // WSLC reported nothing recognizable, so report only what this call is known to have removed.
+        return deleted.Count > 0 ? deleted : [new { Deleted = imageId }];
+    }
+
+    /// <summary>Reads WSLC's Docker-style removal lines, such as "Untagged: redis:latest".</summary>
+    private static List<object> ReadDeleteReport(string output)
+    {
+        var deleted = new List<object>();
+        foreach (var line in output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (line.StartsWith("Untagged:", StringComparison.OrdinalIgnoreCase))
+            {
+                deleted.Add(new { Untagged = line["Untagged:".Length..].Trim() });
+            }
+            else if (line.StartsWith("Deleted:", StringComparison.OrdinalIgnoreCase))
+            {
+                deleted.Add(new { Deleted = line["Deleted:".Length..].Trim() });
+            }
+        }
+
+        return deleted;
+    }
 
     public async Task PullAsync(string image, CancellationToken ct)
     {
