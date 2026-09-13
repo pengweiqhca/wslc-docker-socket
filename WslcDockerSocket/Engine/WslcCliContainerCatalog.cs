@@ -11,11 +11,6 @@ internal sealed class WslcCliContainerCatalog(IWslcCommandRunner runner)
 {
     private const int MaximumInspectBatchSize = 100;
 
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNameCaseInsensitive = true,
-    };
-
     public async Task<IReadOnlyList<WslcCatalogContainer>> ListAsync(CancellationToken ct)
     {
         var result = await RunAsync(["container", "list", "-a", "--format", "json"], ct).ConfigureAwait(false);
