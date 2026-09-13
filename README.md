@@ -139,7 +139,20 @@ Unknown endpoints return Docker's `404` shape with `endpoint not implemented: <m
 
 All state comes from the `wslc` CLI.
 
-**Sessions.** wslc derives its default session name from the account *and* the elevation level, so an elevated process gets a separate `wslc-cli-admin-<account>` session with its own containers. Every command therefore selects a session explicitly, defaulting to `wslc-cli-<account>`, which keeps the adapter on one session whether or not it runs elevated. `--session` is passed before the subcommand, since wslc rejects it afterwards. Two limits are worth knowing: wslc only *selects* an existing session and never creates one (a missing session fails with `WSLC_E_SESSION_NOT_FOUND`), so the adapter first runs a read-only command without the session to bring the current token's default session up and then retries; and an unelevated process cannot attach to an elevated session at all, which fails with `ERROR_ELEVATION_REQUIRED`.
+**Sessions.** wslc derives its default session name from the account *and* the elevation level, so an elevated process gets a separate `wslc-cli-admin-<account>` session with its own containers. Every command therefore selects a session explicitly, defaulting to `wslc-cli-<account>`, which keeps the adapter on one session whether or not it runs elevated. `--session` is passed before the subcommand, since wslc rejects it afterwards. An unelevated process cannot attach to an elevated session at all: that fails with `ERROR_ELEVATION_REQUIRED`.
+
+Sessions are only ever *selected*, never created: `--session` on a name that does not exist fails with `WSLC_E_SESSION_NOT_FOUND`. A session comes into existence implicitly, created by the first wslc command an account runs without naming one. The `wslc-cli-*` names are reserved for that mechanism — creating one through the `Microsoft.WSL.Containers` SDK fails, so the adapter cannot bring its own session up that way either.
+
+After a reboot the session therefore does not exist yet. The reliable fix is outside the adapter: **run one wslc command at logon**, for example a scheduled task executing `wslc ps`, which creates `wslc-cli-<account>` before anything asks for it.
+
+```pwsh
+# Run once at logon so the session exists before the adapter serves a request.
+schtasks /create /tn "wslc session" /tr "wslc ps" /sc onlogon /f
+```
+
+The adapter also recovers on its own if that has not happened: on `WSLC_E_SESSION_NOT_FOUND` it runs one read-only command without the session, which creates the current token's default session, then retries. That works only when the adapter runs under the account the session is named for. If the session still does not exist — an elevated or service account cannot create another account's session — it logs a warning once and continues in whichever session wslc defaults to rather than refusing every request. Running unelevated as that account the two are the same session and nothing changes; for an elevated or service account they differ, which is what the warning is for.
+
+Note that a logon task only helps after logon. An adapter started as a service at boot still answers requests made before you sign in from the fallback session.
 
 **CLI output is a moving target.** WSLC 2.9.10 aligned `wslc container list --format json` with Docker's CLI: `Id` became `ID`, `Name` became `Names`, `State` and `CreatedAt` became text, and IDs are now abbreviated while `container create` and inspect still report the full digest. The list reader accepts both shapes, and identifiers are matched on a prefix in either direction so short and full IDs both resolve. Expect to re-verify against a real installation after every WSLC upgrade; fake-driven tests cannot detect this kind of drift.
 
