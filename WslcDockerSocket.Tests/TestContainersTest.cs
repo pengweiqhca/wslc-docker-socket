@@ -18,8 +18,6 @@ public sealed class TestContainersTest
 
         await using var container = new RedisBuilder("redis")
             .WithDockerEndpoint(ExpectedDockerHost)
-            .WithAutoRemove(true)
-            .WithCleanUp(false)
             .Build();
 
         await container.StartAsync(ct);
@@ -36,8 +34,6 @@ public sealed class TestContainersTest
 
         await using var container = new KafkaBuilder("confluentinc/cp-kafka:7.8.0")
             .WithDockerEndpoint(ExpectedDockerHost)
-            .WithAutoRemove(true)
-            .WithCleanUp(false)
             .Build();
 
         await container.StartAsync(ct);
@@ -50,8 +46,6 @@ public sealed class TestContainersTest
         var port = GetAvailableTcpPort();
         await using var container = new ContainerBuilder("apache/rocketmq:5.3.3")
             .WithDockerEndpoint(ExpectedDockerHost)
-            .WithAutoRemove(true)
-            .WithCleanUp(false)
             .WithEnvironment("TZ", "Asia/Shanghai")
             .WithEnvironment("JAVA_OPT_EXT", "-server -Xms512m -Xmx512m -Xmn256m")
             .WithExposedPort(port)

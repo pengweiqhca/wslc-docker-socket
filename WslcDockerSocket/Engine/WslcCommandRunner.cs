@@ -6,6 +6,8 @@ using System.Text;
 using WslcDockerSocket.Api;
 using WslcDockerSocket.Streaming;
 
+namespace WslcDockerSocket.Engine;
+
 internal interface IWslcCommandRunner
 {
     Task<WslcCommandResult> RunAsync(IReadOnlyList<string> command, CancellationToken ct);
@@ -24,73 +26,95 @@ internal sealed class WslcCommandRunner : IWslcCommandRunner
     private const int MaximumOutputCharacters = 16 * 1024 * 1024;
     private const int StreamingBufferBytes = 81920;
 
+    // wslc's session RPC channel does not tolerate concurrent invocations reliably (observed as a raw
+    // RPC_E_DISCONNECTED failure from wslc itself), so one-shot commands are serialized process-wide. This
+    // matters once a container's own Docker client (e.g. Testcontainers' Ryuk over DOCKER_HOST) can call back
+    // into this engine while the original request that created it is still running.
+    private static readonly SemaphoreSlim WslcSessionGate = new(1, 1);
+
     public async Task<WslcCommandResult> RunAsync(IReadOnlyList<string> command, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(command);
-        using var process = Start(command);
-        var standardOutput = ReadBoundedAsync(process.StandardOutput);
-        var standardError = ReadBoundedAsync(process.StandardError);
+        await WslcSessionGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            await process.WaitForExitAsync(ct).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            Kill(process);
-            await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
-            await Task.WhenAll(standardOutput, standardError).ConfigureAwait(false);
-            throw;
-        }
+            using var process = Start(command);
+            var standardOutput = ReadBoundedAsync(process.StandardOutput);
+            var standardError = ReadBoundedAsync(process.StandardError);
+            try
+            {
+                await process.WaitForExitAsync(ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                Kill(process);
+                await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
+                await Task.WhenAll(standardOutput, standardError).ConfigureAwait(false);
+                throw;
+            }
 
-        var output = await standardOutput.ConfigureAwait(false);
-        var error = await standardError.ConfigureAwait(false);
-        if (output.ExceededLimit || error.ExceededLimit)
-        {
-            throw new DockerApiException(StatusCodes.Status500InternalServerError,
-                $"wslc command output exceeds the {MaximumOutputCharacters} character buffering limit.");
-        }
+            var output = await standardOutput.ConfigureAwait(false);
+            var error = await standardError.ConfigureAwait(false);
+            if (output.ExceededLimit || error.ExceededLimit)
+            {
+                throw new DockerApiException(StatusCodes.Status500InternalServerError,
+                    $"wslc command output exceeds the {MaximumOutputCharacters} character buffering limit.");
+            }
 
-        return new WslcCommandResult(output.Value, error.Value, process.ExitCode);
+            return new WslcCommandResult(output.Value, error.Value, process.ExitCode);
+        }
+        finally
+        {
+            WslcSessionGate.Release();
+        }
     }
 
     public async Task<WslcCommandResult> RunWithStandardInputAsync(IReadOnlyList<string> command, Stream input, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(command);
         ArgumentNullException.ThrowIfNull(input);
-        using var process = Start(command, redirectStandardInput: true);
-        var standardOutput = ReadBoundedAsync(process.StandardOutput);
-        var standardError = ReadBoundedAsync(process.StandardError);
+        await WslcSessionGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            await input.CopyToAsync(process.StandardInput.BaseStream, ct).ConfigureAwait(false);
-            await process.StandardInput.BaseStream.FlushAsync(ct).ConfigureAwait(false);
-            process.StandardInput.Close();
-            await process.WaitForExitAsync(ct).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            Kill(process);
-            await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
-            await Task.WhenAll(standardOutput, standardError).ConfigureAwait(false);
-            throw;
-        }
-        catch
-        {
-            Kill(process);
-            await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
-            await Task.WhenAll(standardOutput, standardError).ConfigureAwait(false);
-            throw;
-        }
+            using var process = Start(command, redirectStandardInput: true);
+            var standardOutput = ReadBoundedAsync(process.StandardOutput);
+            var standardError = ReadBoundedAsync(process.StandardError);
+            try
+            {
+                await input.CopyToAsync(process.StandardInput.BaseStream, ct).ConfigureAwait(false);
+                await process.StandardInput.BaseStream.FlushAsync(ct).ConfigureAwait(false);
+                process.StandardInput.Close();
+                await process.WaitForExitAsync(ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                Kill(process);
+                await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
+                await Task.WhenAll(standardOutput, standardError).ConfigureAwait(false);
+                throw;
+            }
+            catch
+            {
+                Kill(process);
+                await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
+                await Task.WhenAll(standardOutput, standardError).ConfigureAwait(false);
+                throw;
+            }
 
-        var output = await standardOutput.ConfigureAwait(false);
-        var error = await standardError.ConfigureAwait(false);
-        if (output.ExceededLimit || error.ExceededLimit)
-        {
-            throw new DockerApiException(StatusCodes.Status500InternalServerError,
-                $"wslc command output exceeds the {MaximumOutputCharacters} character buffering limit.");
-        }
+            var output = await standardOutput.ConfigureAwait(false);
+            var error = await standardError.ConfigureAwait(false);
+            if (output.ExceededLimit || error.ExceededLimit)
+            {
+                throw new DockerApiException(StatusCodes.Status500InternalServerError,
+                    $"wslc command output exceeds the {MaximumOutputCharacters} character buffering limit.");
+            }
 
-        return new WslcCommandResult(output.Value, error.Value, process.ExitCode);
+            return new WslcCommandResult(output.Value, error.Value, process.ExitCode);
+        }
+        finally
+        {
+            WslcSessionGate.Release();
+        }
     }
 
     public async Task StreamAsync(IReadOnlyList<string> command,
