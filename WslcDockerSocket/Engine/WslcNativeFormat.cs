@@ -69,7 +69,7 @@ internal static class WslcNativeFormat
     }
 
     private static string NormalizeUtcOffset(string offset) =>
-        offset.Length == 5 && offset[0] is '+' or '-' && offset.Skip(1).All(char.IsAsciiDigit)
+        offset is ['+' or '-', _, _, _, _] && offset.Skip(1).All(char.IsAsciiDigit)
             ? $"{offset[..3]}:{offset[3..]}"
             : offset;
 }

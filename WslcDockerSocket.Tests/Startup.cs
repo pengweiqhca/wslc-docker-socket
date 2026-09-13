@@ -1,3 +1,4 @@
+using DotNet.Testcontainers.Configurations;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -10,6 +11,8 @@ public sealed class Startup
 {
     public const string PipeName = "wslc-test";
 
+    static Startup() => TestcontainersSettings.ResourceReaperPrivilegedModeEnabled = false;
+
     public IHostBuilder CreateHostBuilder() => MinimalApiHostBuilderFactory.GetHostBuilder<Program>(false);
 
     public void ConfigureHost(IHostBuilder hostBuilder) => hostBuilder
@@ -17,8 +20,6 @@ public sealed class Startup
         .ConfigureHostConfiguration(builder =>
             builder.AddInMemoryCollection([
                 new("WSLC_DOCKER_SOCKET_PIPE_NAME", PipeName),
-                new("WSLC_DOCKER_SOCKET_DISABLE_NAMED_PIPE", "false"),
-                new("WSLC_DOCKER_SOCKET_ENABLE_TCP", "false"),
             ]));
 
     public void ConfigureServices(IServiceCollection services)

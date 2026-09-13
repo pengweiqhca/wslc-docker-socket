@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using WslcDockerSocket.Api;
 using WslcDockerSocket.Api.Contracts;
+using WslcDockerSocket.Hosting;
 using WslcDockerSocket.Streaming;
 
 namespace WslcDockerSocket.Engine;
@@ -18,22 +19,25 @@ internal sealed class WslcDockerEngine : IDisposable
     private readonly WslcCliImageCatalog _imageCatalog;
     private readonly WslcCliResourceCatalog _resourceCatalog;
     private readonly WslRuntimeDiagnosticsProvider _runtimeDiagnostics;
+    private readonly Uri? _dockerSocketMountDockerHost;
     // Exec records are transient request metadata only; container existence and lifecycle always come from WSLC.
     private readonly ConcurrentDictionary<string, DockerExecState> _execs = new(StringComparer.OrdinalIgnoreCase);
     private int _disposed;
 
-    public WslcDockerEngine()
-        : this(new WslcCommandRunner(), new WslRuntimeDiagnosticsProvider())
+    public WslcDockerEngine(DockerSocketMountAdvertisement? mountAdvertisement = null)
+        : this(new WslcCommandRunner(), new WslRuntimeDiagnosticsProvider(), mountAdvertisement)
     {
     }
 
-    internal WslcDockerEngine(IWslcCommandRunner commandRunner, WslRuntimeDiagnosticsProvider runtimeDiagnostics)
+    internal WslcDockerEngine(IWslcCommandRunner commandRunner, WslRuntimeDiagnosticsProvider runtimeDiagnostics,
+        DockerSocketMountAdvertisement? mountAdvertisement = null)
     {
         _commandRunner = commandRunner;
         _containerCatalog = new WslcCliContainerCatalog(commandRunner);
         _imageCatalog = new WslcCliImageCatalog(commandRunner);
         _resourceCatalog = new WslcCliResourceCatalog(commandRunner);
         _runtimeDiagnostics = runtimeDiagnostics;
+        _dockerSocketMountDockerHost = (mountAdvertisement ?? DockerSocketMountAdvertisement.None).DockerHost;
     }
 
     public static object GetVersion() => new
@@ -103,9 +107,9 @@ internal sealed class WslcDockerEngine : IDisposable
             throw new DockerApiException(StatusCodes.Status400BadRequest, "Image is required");
         }
 
-        RejectUnsupportedConfiguration(request);
+        RejectUnsupportedConfiguration(request, _dockerSocketMountDockerHost);
         var image = DockerImageReference.Parse(request.Image);
-        var command = BuildCreateCommand(requestedName, request, image.CanonicalName);
+        var command = BuildCreateCommand(requestedName, request, image.CanonicalName, _dockerSocketMountDockerHost);
         var result = await _commandRunner.RunAsync(command, ct).ConfigureAwait(false);
         if (result.ExitCode != 0)
         {
@@ -322,7 +326,7 @@ internal sealed class WslcDockerEngine : IDisposable
         }
     }
 
-    private static List<string> BuildCreateCommand(string requestedName, DockerCreateContainerRequest request, string image)
+    private static List<string> BuildCreateCommand(string requestedName, DockerCreateContainerRequest request, string image, Uri? dockerSocketMountDockerHost)
     {
         var command = new List<string> { "container", "create" };
         if (request.HostConfig?.AutoRemove == true) command.Add("--rm");
@@ -336,6 +340,13 @@ internal sealed class WslcDockerEngine : IDisposable
         {
             DockerEnvironment.Parse([environment]);
             command.AddRange(["--env", environment]);
+        }
+
+        // A sole Docker-socket bind mount cannot be backed by a real file; the container gets network access to
+        // this engine over TCP instead, which is what such containers (e.g. Testcontainers' Ryuk) actually want.
+        if (dockerSocketMountDockerHost is not null && DockerSocketMount.IsSoleDockerSocketBind(request.HostConfig))
+        {
+            command.AddRange(["--env", $"DOCKER_HOST={dockerSocketMountDockerHost}"]);
         }
 
         if (request.Entrypoint is { Length: > 0 }) command.AddRange(["--entrypoint", request.Entrypoint[0]]);
@@ -606,14 +617,20 @@ internal sealed class WslcDockerEngine : IDisposable
         }
     }
 
-    private static void RejectUnsupportedConfiguration(DockerCreateContainerRequest request)
+    private static void RejectUnsupportedConfiguration(DockerCreateContainerRequest request, Uri? dockerSocketMountDockerHost)
     {
         if (request.Tty) throw new DockerApiException(StatusCodes.Status501NotImplemented, "TTY containers are not supported by the WSLC Docker socket yet.");
         if (request.HostConfig?.Privileged == true) throw new DockerApiException(StatusCodes.Status501NotImplemented, "Privileged containers are not supported by the WSLC Docker socket yet.");
         if (!string.IsNullOrWhiteSpace(request.WorkingDir)) throw new DockerApiException(StatusCodes.Status501NotImplemented, "WorkingDir is not supported by the WSLC Docker socket yet.");
         if (request.ExposedPorts is { Count: > 0 } && request.ExposedPorts.Keys.Any(port => !HasExplicitPortBinding(port, request.HostConfig?.PortBindings))) throw new DockerApiException(StatusCodes.Status501NotImplemented, "ExposedPorts without a matching explicit port binding are not supported by the WSLC Docker socket yet.");
         if (!string.IsNullOrWhiteSpace(request.HostConfig?.NetworkMode) && !request.HostConfig.NetworkMode.Equals("default", StringComparison.OrdinalIgnoreCase) && !request.HostConfig.NetworkMode.Equals("bridge", StringComparison.OrdinalIgnoreCase)) throw new DockerApiException(StatusCodes.Status501NotImplemented, "Only the default bridge network mode is supported by the WSLC Docker socket.");
-        if (request.HostConfig?.Binds is { Length: > 0 } || request.HostConfig?.Mounts is { Count: > 0 } || request.HostConfig?.Tmpfs is { Count: > 0 }) throw new DockerApiException(StatusCodes.Status501NotImplemented, "Bind mounts, volumes, tmpfs mounts, and Docker socket mounts are not supported by the WSLC Docker socket yet.");
+        if (request.HostConfig?.Binds is { Length: > 0 } || request.HostConfig?.Mounts is { Count: > 0 } || request.HostConfig?.Tmpfs is { Count: > 0 })
+        {
+            var isSoleDockerSocketBind = DockerSocketMount.IsSoleDockerSocketBind(request.HostConfig);
+            if (!isSoleDockerSocketBind) throw new DockerApiException(StatusCodes.Status501NotImplemented, "Bind mounts, volumes, tmpfs mounts, and Docker socket mounts are not supported by the WSLC Docker socket yet.");
+            if (dockerSocketMountDockerHost is null) throw new DockerApiException(StatusCodes.Status501NotImplemented, "Docker socket mounts are only supported when WSLC_DOCKER_SOCKET_DISABLE_HYPERV_TCP is not set to true, so the container can reach this engine over TCP instead of a mounted socket.");
+        }
+
         if (request.NetworkingConfig?.EndpointsConfig is { Count: > 0 }) throw new DockerApiException(StatusCodes.Status501NotImplemented, "Custom Docker networks are not supported by the WSLC Docker socket yet.");
     }
 

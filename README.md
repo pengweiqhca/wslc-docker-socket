@@ -64,18 +64,21 @@ $env:DOCKER_HOST = 'npipe://./pipe/my-pipe-name'
 | `WSLC_DOCKER_SOCKET_PIPE_NAME` | `docker_engine` | Named pipe to listen on. Cannot be empty. |
 | `WSLC_DOCKER_SOCKET_DISABLE_NAMED_PIPE` | `false` | Set `true` only when no named pipe may be created. |
 | `WSLC_DOCKER_SOCKET_ENABLE_TCP` | `false` | Enables the loopback TCP listener. |
+| `WSLC_DOCKER_SOCKET_DISABLE_HYPERV_TCP` | `false` | Set `true` to turn off the additional TCP listener on the Hyper-V virtual-switch host IP that WSLC containers can reach. |
+| `WSLC_DOCKER_SOCKET_HYPERV_TCP_ADDRESS` | auto-detected | Overrides Hyper-V host IP detection unless `WSLC_DOCKER_SOCKET_DISABLE_HYPERV_TCP=true`. |
 | `WSLC_DOCKER_SOCKET_TCP_PORT` | `2375` | TCP port, used only when TCP is enabled. |
 
 Settings can be supplied as environment variables, command-line switches, or an optional `appsettings.user.json` beside the executable, which is reloaded when it changes.
 
-At least one listener must remain enabled; disabling the pipe without enabling TCP fails at startup.
+At least one listener must remain enabled; disabling the pipe while both TCP listeners are disabled fails at startup.
 
 > [!WARNING]
-> TCP is unauthenticated Docker-engine access, and the adapter performs no authentication of its own. It binds `127.0.0.1` only. Do not expose or port-forward it to an untrusted network.
+> TCP is unauthenticated Docker-engine access, and the adapter performs no authentication of its own. Do not expose or port-forward it to an untrusted network.
 
 ```pwsh
-$env:WSLC_DOCKER_SOCKET_ENABLE_TCP = 'true'
-$env:WSLC_DOCKER_SOCKET_TCP_PORT = '2375'   # optional; this is the default
+$env:WSLC_DOCKER_SOCKET_TCP_PORT = '2375'                    # optional; this is the default
+# $env:WSLC_DOCKER_SOCKET_HYPERV_TCP_ADDRESS = '172.27.192.1' # optional override if auto-detection is wrong
+# $env:WSLC_DOCKER_SOCKET_DISABLE_HYPERV_TCP = 'true'          # optional; turns the listener off
 ```
 
 ---
@@ -84,10 +87,9 @@ $env:WSLC_DOCKER_SOCKET_TCP_PORT = '2375'   # optional; this is the default
 
 ```pwsh
 $env:DOCKER_HOST = 'npipe://./pipe/docker_engine'
-$env:TESTCONTAINERS_RYUK_DISABLED = 'true'
 ```
 
-Ryuk must be disabled because it mounts the Docker socket into a container, and this adapter rejects socket and bind mounts. Generic containers work when they rely on an image, command, entrypoint, environment, labels, published ports, logs, wait, exec, and archive upload — which covers the Redis, Kafka, and RocketMQ scenarios in the test suite.
+In test code, set `TestcontainersSettings.ResourceReaperPrivilegedModeEnabled = false;` because WSLC does not support privileged containers. Unless `WSLC_DOCKER_SOCKET_DISABLE_HYPERV_TCP=true`, a request that only mounts `/var/run/docker.sock` (for example Ryuk) is translated into `DOCKER_HOST=tcp://<hyper-v-host-ip>:<tcp-port>` inside that container. This keeps Ryuk cleanup enabled without exposing the adapter on a broader network.
 
 ---
 
@@ -117,7 +119,8 @@ These return a Docker-style `501 Not Implemented` with the reason in the message
 | `GET /events` | WSLC has no event source at all: no `events` command and no change notifications. |
 | `POST /containers/{id}/resize`, `POST /exec/{id}/resize` | There is no TTY to resize — TTY containers are rejected at create and execs run without one. |
 | `GET /images/{name}/history` | WSLC reports no per-layer build history. Inspect exposes only layer digests, without the per-layer command, size, or timestamp Docker's response requires. |
-| Bind, volume, tmpfs, and Docker-socket mounts | Mount semantics are not mapped. |
+| Bind, volume, and tmpfs mounts | Mount semantics are not mapped. |
+| Docker-socket mounts | Unsupported in general; only the sole `/var/run/docker.sock` mount shape is translated to `DOCKER_HOST=tcp://...` unless `WSLC_DOCKER_SOCKET_DISABLE_HYPERV_TCP=true`. |
 | Network create/delete/connect/disconnect, non-default network modes | Only the default bridge network is available. |
 | TTY containers | Not supported. |
 | `POST /containers/{id}/attach` | Not implemented, with or without stdin. Use `GET /containers/{id}/logs` for output. |

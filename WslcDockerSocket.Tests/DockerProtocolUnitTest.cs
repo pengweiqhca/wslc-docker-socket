@@ -123,11 +123,13 @@ public sealed class DockerProtocolUnitTest
     {
         var defaultOptions = DockerSocketOptions.From(new ConfigurationBuilder().AddInMemoryCollection().Build());
         Assert.False(defaultOptions.EnableTcp);
+        Assert.False(defaultOptions.DisableHyperVTcp);
         Assert.False(defaultOptions.DisableNamedPipe);
 
         var noListener = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
             ["WSLC_DOCKER_SOCKET_DISABLE_NAMED_PIPE"] = "true",
+            ["WSLC_DOCKER_SOCKET_DISABLE_HYPERV_TCP"] = "true",
         }).Build();
         Assert.Throws<InvalidOperationException>(() => DockerSocketOptions.From(noListener));
     }

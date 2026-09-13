@@ -1,3 +1,4 @@
+using System.Net;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.Options;
 using Microsoft.OpenApi;
@@ -11,6 +12,17 @@ builder.Configuration.AddJsonFile("appsettings.user.json", optional: true, reloa
 
 var socketOptions = DockerSocketOptions.From(builder.Configuration);
 
+var hyperVTcpAddress = socketOptions.DisableHyperVTcp
+    ? null
+    : IPAddress.Parse(socketOptions.HyperVTcpAddress!);
+
+// Containers need a listener they can actually reach to get Docker-socket-mount requests translated into a
+// DOCKER_HOST TCP endpoint (see DockerSocketMount). Loopback and the docker-bridge gateway are both internal
+// to the WSLC VM/container and never reach Windows, so only the Hyper-V virtual switch address works here.
+builder.Services.AddSingleton(hyperVTcpAddress is null
+    ? DockerSocketMountAdvertisement.None
+    : new DockerSocketMountAdvertisement(new Uri($"tcp://{hyperVTcpAddress}:{socketOptions.TcpPort}")));
+
 builder.Services.AddSingleton<IConfigureOptions<KestrelServerOptions>>(provider =>
     new ConfigureNamedOptions<KestrelServerOptions, DockerExecHijackConnectionHandler>(null,
         provider.GetRequiredService<DockerExecHijackConnectionHandler>(),
@@ -20,6 +32,7 @@ builder.Services.AddSingleton<IConfigureOptions<KestrelServerOptions>>(provider 
                 listener.Use(next => connection => execHijackHandler.HandleAsync(connection, next));
 
             if (socketOptions.EnableTcp) options.ListenLocalhost(socketOptions.TcpPort, configure);
+            if (hyperVTcpAddress is not null) options.Listen(new IPEndPoint(hyperVTcpAddress, socketOptions.TcpPort), configure);
             if (!socketOptions.DisableNamedPipe) options.ListenNamedPipe(socketOptions.NamedPipe, configure);
         }));
 
