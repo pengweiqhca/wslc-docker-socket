@@ -564,21 +564,18 @@ public sealed class WslcCliDefaultScopeTest
         Assert.DoesNotContain(runner.Commands.SelectMany(command => command), argument => string.Equals(argument, "system", StringComparison.Ordinal));
     }
 
-    private sealed class RecordingRunner : IWslcCommandRunner
+    private sealed class RecordingRunner(
+        Func<IReadOnlyList<string>, WslcCommandResult> resultFactory,
+        Func<IReadOnlyList<string>, Func<DockerOutputFrame, CancellationToken, ValueTask>, CancellationToken, Task> streamAsync)
+        : IWslcCommandRunner
     {
-        private readonly Func<IReadOnlyList<string>, WslcCommandResult> _resultFactory;
-        private readonly Func<IReadOnlyList<string>, Func<DockerOutputFrame, CancellationToken, ValueTask>, CancellationToken, Task> _streamAsync;
-
-        public RecordingRunner(WslcCommandResult result) : this(_ => result) { }
+        public RecordingRunner(WslcCommandResult result) : this(_ => result)
+        {
+        }
 
         public RecordingRunner(Func<IReadOnlyList<string>, WslcCommandResult> resultFactory)
-            : this(resultFactory, (_, _, _) => Task.CompletedTask) { }
-
-        public RecordingRunner(Func<IReadOnlyList<string>, WslcCommandResult> resultFactory,
-            Func<IReadOnlyList<string>, Func<DockerOutputFrame, CancellationToken, ValueTask>, CancellationToken, Task> streamAsync)
+            : this(resultFactory, (_, _, _) => Task.CompletedTask)
         {
-            _resultFactory = resultFactory;
-            _streamAsync = streamAsync;
         }
 
         public List<IReadOnlyList<string>> Commands { get; } = [];
@@ -588,23 +585,24 @@ public sealed class WslcCliDefaultScopeTest
         {
             // Image listing inspects images concurrently, so recording must be thread safe.
             lock (Commands) Commands.Add([.. command]);
-            return Task.FromResult(_resultFactory(command));
+            return Task.FromResult(resultFactory(command));
         }
 
-        public async Task<WslcCommandResult> RunWithStandardInputAsync(IReadOnlyList<string> command, Stream input, CancellationToken ct)
+        public async Task<WslcCommandResult> RunWithStandardInputAsync(IReadOnlyList<string> command, Stream input,
+            CancellationToken ct)
         {
             Commands.Add([.. command]);
             await using var captured = new MemoryStream();
             await input.CopyToAsync(captured, ct);
             StandardInputs.Add(captured.ToArray());
-            return _resultFactory(command);
+            return resultFactory(command);
         }
 
         public Task StreamAsync(IReadOnlyList<string> command,
             Func<DockerOutputFrame, CancellationToken, ValueTask> writeFrameAsync, CancellationToken ct)
         {
             Commands.Add([.. command]);
-            return _streamAsync(command, writeFrameAsync, ct);
+            return streamAsync(command, writeFrameAsync, ct);
         }
     }
 }

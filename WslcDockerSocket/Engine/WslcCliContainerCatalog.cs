@@ -11,11 +11,6 @@ internal sealed class WslcCliContainerCatalog(IWslcCommandRunner runner)
 {
     private const int MaximumInspectBatchSize = 100;
 
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNameCaseInsensitive = true,
-    };
-
     public async Task<IReadOnlyList<WslcCatalogContainer>> ListAsync(CancellationToken ct)
     {
         var result = await RunAsync(["container", "list", "-a", "--format", "json"], ct).ConfigureAwait(false);
@@ -205,8 +200,7 @@ internal sealed class WslcCliContainerCatalog(IWslcCommandRunner runner)
         var container = await ResolveAsync(idOrName, ct).ConfigureAwait(false);
         var result = await RunAsync(["container", "inspect", container.Id, "--format", "json"], ct)
             .ConfigureAwait(false);
-        var inspect = JsonNode.Parse(result.StandardOutput) as JsonArray;
-        if (inspect is null || inspect.Count != 1 || inspect[0] is not JsonObject inspectObject)
+        if (JsonNode.Parse(result.StandardOutput) is not (JsonArray and [JsonObject inspectObject]))
         {
             throw new DockerApiException(StatusCodes.Status500InternalServerError,
                 $"WSLC returned an invalid inspect response for container {container.Id}.");
@@ -214,11 +208,11 @@ internal sealed class WslcCliContainerCatalog(IWslcCommandRunner runner)
 
         // WSLC reports bound ports at the top level. Docker clients, including Testcontainers,
         // read the same map from NetworkSettings.Ports.
-        var networkSettings = inspectObject["NetworkSettings"] as JsonObject ?? new JsonObject();
+        var networkSettings = inspectObject["NetworkSettings"] as JsonObject ?? [];
         networkSettings["Ports"] ??= inspectObject["Ports"]?.DeepClone() ?? new JsonObject();
         inspectObject["NetworkSettings"] = networkSettings;
         if (inspectObject["Name"] is JsonValue name && name.TryGetValue<string>(out var value)
-            && !string.IsNullOrWhiteSpace(value) && !value.StartsWith("/", StringComparison.Ordinal))
+            && !string.IsNullOrWhiteSpace(value) && !value.StartsWith('/'))
         {
             inspectObject["Name"] = "/" + value;
         }

@@ -7,7 +7,7 @@ using System.Text.RegularExpressions;
 /// Reads the runtime facts Docker clients display for the WSLC-backed Linux environment.
 /// Probe failures are intentionally represented by empty/zero values so diagnostics never make /info fail.
 /// </summary>
-internal sealed class WslRuntimeDiagnosticsProvider
+internal sealed partial class WslRuntimeDiagnosticsProvider
 {
     private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(5);
     private readonly Lazy<Task<WslRuntimeDiagnostics>> _diagnostics = new(ProbeAsync);
@@ -90,7 +90,7 @@ internal sealed class WslRuntimeDiagnosticsProvider
 
     private static string ParseWslcVersion(string output)
     {
-        var match = Regex.Match(output, @"(?im)^\s*wslc\s+(?<version>\d+(?:\.\d+){1,3}(?:[-+][^\s]+)?)\s*$");
+        var match = VersionRegex().Match(output);
         return match.Success ? match.Groups["version"].Value : string.Empty;
     }
 
@@ -100,7 +100,7 @@ internal sealed class WslRuntimeDiagnosticsProvider
 
     private static long ParseMemTotal(string output)
     {
-        var match = Regex.Match(output, @"(?im)^\s*MemTotal:\s*(?<kib>\d+)\s*kB\s*$");
+        var match = MemTotalRegex().Match(output);
         if (!match.Success || !long.TryParse(match.Groups["kib"].Value, NumberStyles.None,
                 CultureInfo.InvariantCulture, out var kibibytes))
         {
@@ -116,6 +116,12 @@ internal sealed class WslRuntimeDiagnosticsProvider
             return 0;
         }
     }
+
+    [GeneratedRegex(@"(?im)^\s*wslc\s+(?<version>\d+(?:\.\d+){1,3}(?:[-+][^\s]+)?)\s*$", RegexOptions.None, "zh-CN")]
+    private static partial Regex VersionRegex();
+
+    [GeneratedRegex(@"(?im)^\s*MemTotal:\s*(?<kib>\d+)\s*kB\s*$", RegexOptions.None, "zh-CN")]
+    private static partial Regex MemTotalRegex();
 }
 
 internal readonly record struct WslRuntimeDiagnostics(

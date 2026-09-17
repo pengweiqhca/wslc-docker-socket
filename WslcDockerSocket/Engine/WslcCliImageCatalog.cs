@@ -317,7 +317,7 @@ internal sealed class WslcCliImageCatalog(IWslcCommandRunner runner)
         var tagName = GetOptionalString(image, "Tag");
         return string.IsNullOrWhiteSpace(repository) || string.IsNullOrWhiteSpace(tagName)
             || tagName.Equals("<none>", StringComparison.OrdinalIgnoreCase)
-            ? new JsonArray()
+            ? []
             : new JsonArray($"{repository}:{tagName}");
     }
 

@@ -33,7 +33,7 @@ public static class HyperVNetwork
                 new ObjectQuery("SELECT * FROM Msvm_InternalEthernetPort"));
 
             using var ports = searcher.Get();
-            wmiNics = ReadWmiNics(ports).ToArray();
+            wmiNics = [.. ReadWmiNics(ports)];
         }
         catch (ManagementException)
         {
@@ -73,7 +73,7 @@ public static class HyperVNetwork
     [SupportedOSPlatform("windows")]
     private static IEnumerable<HyperVHostNic> ReadWmiNics(ManagementObjectCollection ports)
     {
-        foreach (ManagementObject port in ports)
+        foreach (var port in ports.Cast<ManagementObject>())
         {
             var deviceId = port["DeviceID"]?.ToString();
             if (string.IsNullOrWhiteSpace(deviceId)) continue;
@@ -113,8 +113,6 @@ public static class HyperVNetwork
     private static string NormalizeMac(string mac)
     {
         return new string(
-            mac.Where(Uri.IsHexDigit)
-                .Select(char.ToUpperInvariant)
-                .ToArray());
+            [.. mac.Where(Uri.IsHexDigit).Select(char.ToUpperInvariant)]);
     }
 }

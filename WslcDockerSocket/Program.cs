@@ -1,5 +1,9 @@
+using System.IO.Pipes;
 using System.Net;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.AspNetCore.Server.Kestrel.Transport.NamedPipes;
 using Microsoft.Extensions.Options;
 using Microsoft.OpenApi;
 using WslcDockerSocket.Api;
@@ -30,13 +34,29 @@ builder.Services.AddSingleton<IConfigureOptions<KestrelServerOptions>>(provider 
         provider.GetRequiredService<DockerExecHijackConnectionHandler>(),
         (options, execHijackHandler) =>
         {
-            Action<ListenOptions> configure = listener =>
+            void configure(ListenOptions listener) =>
                 listener.Use(next => connection => execHijackHandler.HandleAsync(connection, next));
 
             if (socketOptions.EnableTcp) options.ListenLocalhost(socketOptions.TcpPort, configure);
             if (hyperVTcpAddress is not null) options.Listen(new IPEndPoint(hyperVTcpAddress, socketOptions.TcpPort), configure);
             if (!socketOptions.DisableNamedPipe) options.ListenNamedPipe(socketOptions.NamedPipe, configure);
         }));
+
+builder.Services.PostConfigure<NamedPipeTransportOptions>(options =>
+{
+    if (socketOptions.DisableNamedPipe || !OperatingSystem.IsWindows()) return;
+
+    options.CurrentUserOnly = false;
+
+    var security = new PipeSecurity();
+
+    security.AddAccessRule(new PipeAccessRule(
+        new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+        PipeAccessRights.ReadWrite | PipeAccessRights.CreateNewInstance,
+        AccessControlType.Allow));
+
+    options.PipeSecurity = security;
+});
 
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
