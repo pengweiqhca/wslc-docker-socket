@@ -6,6 +6,8 @@
     <IsPackable>false</IsPackable>
     <OutputType>Exe</OutputType>
     <StaticWebAssetsEnabled>false</StaticWebAssetsEnabled>
+    <!-- Needed for NotifyIcon/SetWinEventHook so the console window can minimize to the system tray. -->
+    <UseWindowsForms>true</UseWindowsForms>
   </PropertyGroup>
 
   <ItemGroup>

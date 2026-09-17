@@ -1,7 +1,9 @@
 using System.Net;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.Options;
+#if DEBUG
 using Microsoft.OpenApi;
+#endif
 using WslcDockerSocket.Api;
 using WslcDockerSocket.Engine;
 using WslcDockerSocket.Hosting;
@@ -77,6 +79,11 @@ builder.Services.AddSwaggerGen(options =>
 var app = builder.Build();
 
 app.Lifetime.ApplicationStopping.Register(app.Services.GetRequiredService<WslcDockerEngine>().Dispose);
+
+// Keeps the console-mode process running as before; this only adds a tray icon that appears once the console
+// window is minimized, and lets it be restored or the app exited from there.
+var trayIcon = ConsoleTrayIcon.Start(app.Lifetime);
+if (trayIcon is not null) app.Lifetime.ApplicationStopping.Register(trayIcon.Dispose);
 
 // The version prefix must move into PathBase before routing, so UseRouting is placed explicitly:
 // WebApplication would otherwise match endpoints ahead of all application middleware.
