@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <RollForward>Major</RollForward>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFramework>net10.0-windows</TargetFramework>
     <IsPackable>false</IsPackable>
     <OutputType>Exe</OutputType>
     <StaticWebAssetsEnabled>false</StaticWebAssetsEnabled>
@@ -11,8 +11,8 @@
   <ItemGroup>
     <InternalsVisibleTo Include="WslcDockerSocket.Tests" />
 
-    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
-    <PackageReference Include="Swashbuckle.AspNetCore" />
+    <!--<PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />-->
+    <PackageReference Include="Swashbuckle.AspNetCore" Condition="'$(Configuration)' == 'Debug'" />
     <PackageReference Include="System.Management" />
   </ItemGroup>
 
