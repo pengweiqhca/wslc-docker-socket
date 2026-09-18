@@ -33,6 +33,12 @@ If you change the pipe name, point clients at it explicitly:
 $env:DOCKER_HOST = 'npipe://./pipe/my-pipe-name'
 ```
 
+Pass `--type=trayIcon` to run without a visible console window, behind a system tray icon instead. Console-mode behavior (logging, listeners, everything else) is otherwise unchanged; the icon's context menu can show the console window again or exit the app.
+
+```pwsh
+dotnet run --project WslcDockerSocket/WslcDockerSocket.csproj --configuration Release -- --type=trayIcon
+```
+
 ---
 
 ## Key Features

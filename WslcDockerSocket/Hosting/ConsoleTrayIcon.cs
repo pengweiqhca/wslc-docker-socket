@@ -2,28 +2,39 @@ namespace WslcDockerSocket.Hosting;
 
 using System.Drawing;
 using System.Windows.Forms;
+using Microsoft.Extensions.Configuration;
 
 /// <summary>
-/// Hides the console window into the system tray instead of the taskbar when it's minimized. Console input,
-/// output, and the rest of the process are untouched by this: it only owns a tray icon and a dedicated STA
-/// thread to pump the Windows messages <see cref="NotifyIcon"/> and the minimize hook need.
+/// Optional tray-icon launch mode, enabled with <c>--type=trayIcon</c>. The console window is hidden before
+/// anything else runs instead of being minimized to the taskbar; the process keeps its console (so redirected
+/// output, logging, and Ctrl+C all work exactly as in normal console mode), it's just not shown until the tray
+/// icon is clicked.
 /// </summary>
 /// <remarks>
-/// Detecting the minimize click relies on <c>GetConsoleWindow</c>, which under Windows Terminal returns the
-/// hidden ConPTY pseudo-console window rather than the visible frame the user actually minimizes. There the
-/// tray icon still appears and can restore the window, but clicking the minimize button itself won't trigger
-/// it. Running under the classic Console Host (conhost.exe, e.g. cmd.exe/PowerShell's default host) is
-/// unaffected.
+/// Minimize-button hooking (the previous approach) breaks under Windows Terminal: <c>GetConsoleWindow()</c>
+/// there returns ConPTY's hidden proxy window, not the real Terminal window the user sees, so the minimize
+/// click never reaches it. Direct <c>ShowWindow</c> calls against that same handle do not have this problem —
+/// Windows Terminal forwards them to the real window as an explicit compatibility shim (see
+/// https://github.com/microsoft/terminal/blob/main/doc/specs/%2312570%20-%20Show%20Hide%20operations%20on%20GetConsoleWindow%20via%20PTY.md).
+/// Hiding and restoring the window programmatically therefore works under both the classic Console Host and
+/// Windows Terminal, where hooking the button click did not.
+///
+/// One caveat inherited from that shim: hiding/restoring acts on the whole Terminal window, including any other
+/// tabs sharing it, when the app is launched from an already-open Windows Terminal tab rather than its own
+/// window.
 /// </remarks>
 internal sealed class ConsoleTrayIcon : IDisposable
 {
+    private const string TypeArgumentKey = "type";
+    private const string TrayIconTypeValue = "trayIcon";
+
     private readonly Thread _thread;
     private readonly ManualResetEventSlim _ready = new();
     private MessagePump? _pump;
 
-    private ConsoleTrayIcon(IntPtr consoleWindow, IHostApplicationLifetime lifetime)
+    private ConsoleTrayIcon(IHostApplicationLifetime lifetime)
     {
-        _thread = new Thread(() => RunMessageLoop(consoleWindow, lifetime))
+        _thread = new Thread(() => RunMessageLoop(lifetime))
         {
             IsBackground = true,
             Name = "ConsoleTrayIcon",
@@ -31,21 +42,38 @@ internal sealed class ConsoleTrayIcon : IDisposable
         _thread.SetApartmentState(ApartmentState.STA);
     }
 
-    /// <summary>Starts the tray icon, or returns null when there is no console window to minimize.</summary>
-    public static ConsoleTrayIcon? Start(IHostApplicationLifetime lifetime)
+    /// <summary>Whether <c>--type=trayIcon</c> was passed on the command line.</summary>
+    public static bool IsRequested(string[] args) => string.Equals(
+        new ConfigurationBuilder().AddCommandLine(args).Build()[TypeArgumentKey],
+        TrayIconTypeValue,
+        StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Hides the console window as early as possible in tray-icon mode, before the rest of startup (host
+    /// building, Hyper-V adapter detection, etc.) has a chance to run and keep it visible for longer than
+    /// necessary. There's no console window to hide when <c>GetConsoleWindow()</c> returns none, e.g. when the
+    /// process was launched detached from any console.
+    /// </summary>
+    public static void HideConsoleWindow()
     {
         var consoleWindow = NativeMethods.GetConsoleWindow();
-        if (consoleWindow == IntPtr.Zero) return null;
+        if (consoleWindow != IntPtr.Zero) NativeMethods.ShowWindow(consoleWindow, NativeMethods.SwHide);
+    }
 
-        var trayIcon = new ConsoleTrayIcon(consoleWindow, lifetime);
+    /// <summary>Starts the tray icon, or returns null when there is no console window to show/hide.</summary>
+    public static ConsoleTrayIcon? Start(IHostApplicationLifetime lifetime)
+    {
+        if (NativeMethods.GetConsoleWindow() == IntPtr.Zero) return null;
+
+        var trayIcon = new ConsoleTrayIcon(lifetime);
         trayIcon._thread.Start();
         trayIcon._ready.Wait();
         return trayIcon;
     }
 
-    private void RunMessageLoop(IntPtr consoleWindow, IHostApplicationLifetime lifetime)
+    private void RunMessageLoop(IHostApplicationLifetime lifetime)
     {
-        _pump = new MessagePump(consoleWindow, lifetime);
+        _pump = new MessagePump(lifetime);
         _ready.Set();
         Application.Run();
     }
@@ -68,21 +96,16 @@ internal sealed class ConsoleTrayIcon : IDisposable
     }
 
     /// <summary>
-    /// A never-shown control whose only purpose is owning a window handle: <see cref="NotifyIcon"/> and
-    /// <c>SetWinEventHook</c> both need a message loop to dispatch to, and <see cref="Control.BeginInvoke(Delegate)"/>
-    /// gives <see cref="ConsoleTrayIcon.Dispose"/> a safe way to reach this thread from the outside.
+    /// A never-shown control whose only purpose is owning a window handle: <see cref="NotifyIcon"/> needs a
+    /// message loop to dispatch to, and <see cref="Control.BeginInvoke(Delegate)"/> gives
+    /// <see cref="ConsoleTrayIcon.Dispose"/> a safe way to reach this thread from the outside.
     /// </summary>
     private sealed class MessagePump : Control
     {
-        private readonly IntPtr _consoleWindow;
         private readonly NotifyIcon _notifyIcon;
-        private readonly NativeMethods.WinEventDelegate _winEventCallback;
-        private readonly IntPtr _winEventHook;
 
-        public MessagePump(IntPtr consoleWindow, IHostApplicationLifetime lifetime)
+        public MessagePump(IHostApplicationLifetime lifetime)
         {
-            _consoleWindow = consoleWindow;
-
             // Forces the window handle to be created now, without ever showing anything on screen.
             _ = Handle;
 
@@ -95,44 +118,27 @@ internal sealed class ConsoleTrayIcon : IDisposable
                 Icon = SystemIcons.Application,
                 Text = "wslc-docker-socket",
                 ContextMenuStrip = menu,
-                Visible = false,
+                Visible = true,
             };
-            _notifyIcon.DoubleClick += (_, _) => RestoreConsole();
-
-            // Scoped to all processes/threads (idProcess=0, idThread=0): the console window belongs to
-            // conhost/Terminal, not this process, so the hook cannot be scoped to this process's own id. The
-            // callback below filters events down to the console window handle itself.
-            _winEventCallback = OnWinEvent;
-            _winEventHook = NativeMethods.SetWinEventHook(NativeMethods.EventSystemMinimizeStart,
-                NativeMethods.EventSystemMinimizeStart, IntPtr.Zero, _winEventCallback, 0, 0,
-                NativeMethods.WinEventOutOfContext);
-        }
-
-        private void OnWinEvent(IntPtr hWinEventHook, uint eventType, IntPtr hwnd, int idObject, int idChild,
-            uint dwEventThread, uint dwmsEventTime)
-        {
-            if (hwnd != _consoleWindow || idObject != NativeMethods.ObjIdWindow || idChild != NativeMethods.ChildIdSelf)
+            _notifyIcon.MouseClick += (_, e) =>
             {
-                return;
-            }
-
-            NativeMethods.ShowWindow(_consoleWindow, NativeMethods.SwHide);
-            _notifyIcon.Visible = true;
+                if (e.Button == MouseButtons.Left) RestoreConsole();
+            };
         }
 
-        private void RestoreConsole()
+        private static void RestoreConsole()
         {
-            _notifyIcon.Visible = false;
-            NativeMethods.ShowWindow(_consoleWindow, NativeMethods.SwRestore);
-            NativeMethods.SetForegroundWindow(_consoleWindow);
+            var consoleWindow = NativeMethods.GetConsoleWindow();
+            if (consoleWindow == IntPtr.Zero) return;
+
+            NativeMethods.ShowWindow(consoleWindow, NativeMethods.SwRestore);
+            NativeMethods.SetForegroundWindow(consoleWindow);
         }
 
         protected override void Dispose(bool disposing)
         {
             if (disposing)
             {
-                if (_winEventHook != IntPtr.Zero) NativeMethods.UnhookWinEvent(_winEventHook);
-
                 _notifyIcon.Visible = false;
                 _notifyIcon.Dispose();
             }

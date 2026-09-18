@@ -8,6 +8,11 @@ using WslcDockerSocket.Api;
 using WslcDockerSocket.Engine;
 using WslcDockerSocket.Hosting;
 
+// Checked and acted on before WebApplication.CreateBuilder so the console window never becomes visible at
+// all in tray-icon mode, rather than flashing on screen and then disappearing.
+var trayIconMode = ConsoleTrayIcon.IsRequested(args);
+if (trayIconMode) ConsoleTrayIcon.HideConsoleWindow();
+
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Configuration.AddJsonFile("appsettings.user.json", optional: true, reloadOnChange: true);
@@ -80,9 +85,8 @@ var app = builder.Build();
 
 app.Lifetime.ApplicationStopping.Register(app.Services.GetRequiredService<WslcDockerEngine>().Dispose);
 
-// Keeps the console-mode process running as before; this only adds a tray icon that appears once the console
-// window is minimized, and lets it be restored or the app exited from there.
-var trayIcon = ConsoleTrayIcon.Start(app.Lifetime);
+// Console behavior is otherwise unchanged; pass --type=trayIcon to run headless behind a tray icon instead.
+var trayIcon = trayIconMode ? ConsoleTrayIcon.Start(app.Lifetime) : null;
 if (trayIcon is not null) app.Lifetime.ApplicationStopping.Register(trayIcon.Dispose);
 
 // The version prefix must move into PathBase before routing, so UseRouting is placed explicitly:
