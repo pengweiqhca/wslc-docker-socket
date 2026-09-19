@@ -16,4 +16,8 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    /// <summary>Releases the HICON produced by <see cref="Bitmap.GetHicon"/> in <see cref="EmojiIcon"/>.</summary>
+    [DllImport("user32.dll")]
+    public static extern bool DestroyIcon(IntPtr hIcon);
 }

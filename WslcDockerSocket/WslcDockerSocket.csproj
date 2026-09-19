@@ -14,6 +14,8 @@
     <InternalsVisibleTo Include="WslcDockerSocket.Tests" />
 
     <!--<PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />-->
+    <!-- Renders the tray icon's emoji in color; GDI+/System.Drawing cannot draw color-font glyphs. -->
+    <PackageReference Include="SkiaSharp" />
     <PackageReference Include="Swashbuckle.AspNetCore" Condition="'$(Configuration)' == 'Debug'" />
     <PackageReference Include="System.Management" />
   </ItemGroup>

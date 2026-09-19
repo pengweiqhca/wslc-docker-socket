@@ -103,6 +103,7 @@ internal sealed class ConsoleTrayIcon : IDisposable
     private sealed class MessagePump : Control
     {
         private readonly NotifyIcon _notifyIcon;
+        private readonly Icon _trayIcon;
 
         public MessagePump(IHostApplicationLifetime lifetime)
         {
@@ -113,9 +114,10 @@ internal sealed class ConsoleTrayIcon : IDisposable
             menu.Items.Add("Show console", null, (_, _) => RestoreConsole());
             menu.Items.Add("Exit", null, (_, _) => lifetime.StopApplication());
 
+            _trayIcon = EmojiIcon.Render("\U0001F6A2"); // 🚢 — evokes "container" without borrowing anyone's logo.
             _notifyIcon = new NotifyIcon
             {
-                Icon = SystemIcons.Application,
+                Icon = _trayIcon,
                 Text = "wslc-docker-socket",
                 ContextMenuStrip = menu,
                 Visible = true,
@@ -141,6 +143,7 @@ internal sealed class ConsoleTrayIcon : IDisposable
             {
                 _notifyIcon.Visible = false;
                 _notifyIcon.Dispose();
+                _trayIcon.Dispose();
             }
 
             base.Dispose(disposing);
