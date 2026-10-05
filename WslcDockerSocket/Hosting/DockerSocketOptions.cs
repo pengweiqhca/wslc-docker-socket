@@ -1,3 +1,5 @@
+using System.Security.Principal;
+
 namespace WslcDockerSocket.Hosting;
 
 using System.Net;
@@ -7,7 +9,7 @@ internal sealed class DockerSocketOptions
     /// <summary>
     /// The WSLC session every command runs in. It defaults to the session name wslc derives for the current account, so an elevated adapter stays on the same session as an unelevated one instead of getting the separate <c>wslc-cli-admin-*</c> session wslc picks for an elevated token. Set it empty to let wslc choose the session for the current process.
     /// </summary>
-    public required string Session { get; init; }
+    public string? Session { get; init; }
 
     public required ushort TcpPort { get; init; }
 
@@ -68,7 +70,17 @@ internal sealed class DockerSocketOptions
             EnableTcp = enableTcp,
             DisableHyperVTcp = disableHyperVTcp,
             HyperVTcpAddress = hyperVTcpAddress,
-            Session = configuration["WSLC_DOCKER_SOCKET_SESSION"] ?? $"wslc-cli-{Environment.UserName}",
+            Session = IsAdministrator() ? $"wslc-cli-{Environment.UserName}" : null,
         };
+    }
+
+    /// <summary>
+    /// 判断当前进程是否以管理员身份运行
+    /// </summary>
+    private static bool IsAdministrator()
+    {
+        using var identity = WindowsIdentity.GetCurrent();
+
+        return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
     }
 }

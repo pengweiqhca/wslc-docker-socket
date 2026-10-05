@@ -2,17 +2,21 @@
 
   <PropertyGroup>
     <RollForward>Major</RollForward>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFramework>net10.0-windows</TargetFramework>
     <IsPackable>false</IsPackable>
     <OutputType>Exe</OutputType>
     <StaticWebAssetsEnabled>false</StaticWebAssetsEnabled>
+    <!-- Needed for NotifyIcon/SetWinEventHook so the console window can minimize to the system tray. -->
+    <UseWindowsForms>true</UseWindowsForms>
   </PropertyGroup>
 
   <ItemGroup>
     <InternalsVisibleTo Include="WslcDockerSocket.Tests" />
 
-    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
-    <PackageReference Include="Swashbuckle.AspNetCore" />
+    <!--<PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />-->
+    <!-- Renders the tray icon's emoji in color; GDI+/System.Drawing cannot draw color-font glyphs. -->
+    <PackageReference Include="SkiaSharp" />
+    <PackageReference Include="Swashbuckle.AspNetCore" Condition="'$(Configuration)' == 'Debug'" />
     <PackageReference Include="System.Management" />
   </ItemGroup>
 

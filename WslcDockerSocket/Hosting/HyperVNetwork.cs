@@ -1,7 +1,6 @@
 using System.Management;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
-using System.Runtime.Versioning;
 
 namespace WslcDockerSocket.Hosting;
 
@@ -21,8 +20,6 @@ public static class HyperVNetwork
 
     public static IEnumerable<HyperVHostNic> GetHostVirtualNics()
     {
-        if (!OperatingSystem.IsWindows()) yield break;
-
         IEnumerable<HyperVHostNic> wmiNics = [];
         try
         {
@@ -70,7 +67,6 @@ public static class HyperVNetwork
         }
     }
 
-    [SupportedOSPlatform("windows")]
     private static IEnumerable<HyperVHostNic> ReadWmiNics(ManagementObjectCollection ports)
     {
         foreach (var port in ports.Cast<ManagementObject>())

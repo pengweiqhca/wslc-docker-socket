@@ -1,5 +1,6 @@
 using System.Buffers.Text;
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -168,6 +169,23 @@ internal sealed class WslcDockerEngine : IDisposable
         return true;
     }
 
+    /// <summary>
+    /// Unlike start/stop, restart has no running-state short circuit: Docker's restart always runs the stop
+    /// (if running) and start sequence regardless of current state, and so does <c>wslc container restart</c>.
+    /// </summary>
+    public async Task RestartContainerAsync(string id, int? timeoutSeconds, CancellationToken ct)
+    {
+        var container = await _containerCatalog.ResolveAsync(id, ct).ConfigureAwait(false);
+        var command = new List<string> { "container", "restart" };
+        if (timeoutSeconds is { } seconds)
+        {
+            command.AddRange(["--timeout", seconds.ToString(CultureInfo.InvariantCulture)]);
+        }
+
+        command.Add(container.Id);
+        await RunMutationAsync(command, ct).ConfigureAwait(false);
+    }
+
     public async Task CopyArchiveToContainerAsync(string id, string path, Stream archive, CancellationToken ct)
     {
         ThrowIfDisposed();
@@ -271,6 +289,86 @@ internal sealed class WslcDockerEngine : IDisposable
         Filter(await _resourceCatalog.ListAndInspectAsync("network", ct).ConfigureAwait(false),
             DockerFilters.FromQuery(query, "label", "name", "driver", "id"));
     public Task<JsonElement> InspectNetworkAsync(string idOrName, CancellationToken ct) => _resourceCatalog.InspectAsync("network", idOrName, ct);
+
+    public async Task<(string Id, string Warning)> CreateNetworkAsync(DockerCreateNetworkRequest request, CancellationToken ct)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(request);
+        if (string.IsNullOrWhiteSpace(request.Name))
+        {
+            throw new DockerApiException(StatusCodes.Status400BadRequest, "Name is required");
+        }
+
+        if (request.Attachable) throw new DockerApiException(StatusCodes.Status501NotImplemented, "Attachable networks are not supported by the WSLC Docker socket yet.");
+        if (request.EnableIPv6) throw new DockerApiException(StatusCodes.Status501NotImplemented, "IPv6-enabled networks are not supported by the WSLC Docker socket yet.");
+        if (request.IPAM?.Config is { Count: > 1 }) throw new DockerApiException(StatusCodes.Status501NotImplemented, "Multiple IPAM configs per network are not supported by the WSLC Docker socket yet.");
+
+        var command = new List<string> { "network", "create" };
+        if (!string.IsNullOrWhiteSpace(request.Driver)) command.AddRange(["--driver", request.Driver]);
+        if (request.Internal) command.Add("--internal");
+        var ipamConfig = request.IPAM?.Config?.FirstOrDefault();
+        if (!string.IsNullOrWhiteSpace(ipamConfig?.Subnet)) command.AddRange(["--subnet", ipamConfig.Subnet]);
+        if (!string.IsNullOrWhiteSpace(ipamConfig?.Gateway)) command.AddRange(["--gateway", ipamConfig.Gateway]);
+        if (!string.IsNullOrWhiteSpace(ipamConfig?.IPRange)) command.AddRange(["--ip-range", ipamConfig.IPRange]);
+        foreach (var (key, value) in request.Options ?? []) command.AddRange(["--opt", $"{key}={value}"]);
+        foreach (var (key, value) in request.Labels ?? []) command.AddRange(["--label", $"{key}={value}"]);
+        command.Add(request.Name);
+
+        var result = await _commandRunner.RunAsync(command, ct).ConfigureAwait(false);
+        if (result.ExitCode != 0)
+        {
+            ThrowMutationFailure(command, result, request.Name);
+        }
+
+        var network = await _resourceCatalog.InspectAsync("network", request.Name, ct).ConfigureAwait(false);
+        var id = network.TryGetProperty("Id", out var idProperty) && idProperty.ValueKind == JsonValueKind.String
+            ? idProperty.GetString() ?? request.Name
+            : request.Name;
+        return (id, string.Empty);
+    }
+
+    public async Task ConnectNetworkAsync(string networkId, DockerNetworkConnectRequest request, CancellationToken ct)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(request);
+        if (string.IsNullOrWhiteSpace(request.Container))
+        {
+            throw new DockerApiException(StatusCodes.Status400BadRequest, "Container is required");
+        }
+
+        if (request.EndpointConfig?.IPAMConfig?.IPv6Address is { Length: > 0 }) throw new DockerApiException(StatusCodes.Status501NotImplemented, "Assigning an IPv6 address on connect is not supported by the WSLC Docker socket yet.");
+
+        var network = await _resourceCatalog.InspectAsync("network", networkId, ct).ConfigureAwait(false);
+        var networkName = ReadString(network, "Name") is { Length: > 0 } name ? name : networkId;
+        var container = await _containerCatalog.ResolveAsync(request.Container, ct).ConfigureAwait(false);
+
+        var command = new List<string> { "network", "connect" };
+        if (!string.IsNullOrWhiteSpace(request.EndpointConfig?.IPAMConfig?.IPv4Address)) command.AddRange(["--ip", request.EndpointConfig.IPAMConfig.IPv4Address]);
+        foreach (var alias in request.EndpointConfig?.Aliases ?? []) command.AddRange(["--network-alias", alias]);
+        foreach (var link in request.EndpointConfig?.Links ?? []) command.AddRange(["--link", link]);
+        command.AddRange([networkName, container.Id]);
+
+        await RunMutationAsync(command, ct).ConfigureAwait(false);
+    }
+
+    public async Task DisconnectNetworkAsync(string networkId, DockerNetworkDisconnectRequest request, CancellationToken ct)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(request);
+        if (string.IsNullOrWhiteSpace(request.Container))
+        {
+            throw new DockerApiException(StatusCodes.Status400BadRequest, "Container is required");
+        }
+
+        var network = await _resourceCatalog.InspectAsync("network", networkId, ct).ConfigureAwait(false);
+        var networkName = ReadString(network, "Name") is { Length: > 0 } name ? name : networkId;
+        // Docker's Force flag skips validation that is only meaningful when disconnecting a container the
+        // network driver itself cannot reach; wslc has no equivalent switch, and the plain disconnect command
+        // has the same effect either way.
+        var container = await _containerCatalog.ResolveAsync(request.Container, ct).ConfigureAwait(false);
+
+        await RunMutationAsync(["network", "disconnect", networkName, container.Id], ct).ConfigureAwait(false);
+    }
 
     public async Task<IReadOnlyList<object>> ListContainersAsync(IQueryCollection query, CancellationToken ct)
     {
@@ -420,6 +518,14 @@ internal sealed class WslcDockerEngine : IDisposable
         if (request.Entrypoint is { Length: > 0 }) command.AddRange(["--entrypoint", request.Entrypoint[0]]);
         foreach (var (key, value) in request.Labels ?? []) command.AddRange(["--label", $"{key}={value}"]);
         foreach (var binding in DockerPortBinding.Parse(request.HostConfig?.PortBindings)) command.AddRange(["--publish", binding.ToWslcPublishArgument()]);
+        var networkAttachment = ReadNetworkAttachment(request);
+        if (networkAttachment is { } attachment)
+        {
+            command.AddRange(["--network", attachment.NetworkName]);
+            if (!string.IsNullOrWhiteSpace(attachment.IPv4Address)) command.AddRange(["--ip", attachment.IPv4Address]);
+            foreach (var alias in attachment.Aliases) command.AddRange(["--network-alias", alias]);
+        }
+
         command.Add(image);
         if (request.Entrypoint is { Length: > 1 }) command.AddRange(request.Entrypoint[1..]);
         command.AddRange(request.Cmd ?? []);
@@ -701,7 +807,17 @@ internal sealed class WslcDockerEngine : IDisposable
         if (request.HostConfig?.Privileged == true) throw new DockerApiException(StatusCodes.Status501NotImplemented, "Privileged containers are not supported by the WSLC Docker socket yet.");
         if (!string.IsNullOrWhiteSpace(request.WorkingDir)) throw new DockerApiException(StatusCodes.Status501NotImplemented, "WorkingDir is not supported by the WSLC Docker socket yet.");
         if (request.ExposedPorts is { Count: > 0 } && request.ExposedPorts.Keys.Any(port => !HasExplicitPortBinding(port, request.HostConfig?.PortBindings))) throw new DockerApiException(StatusCodes.Status501NotImplemented, "ExposedPorts without a matching explicit port binding are not supported by the WSLC Docker socket yet.");
-        if (!string.IsNullOrWhiteSpace(request.HostConfig?.NetworkMode) && !request.HostConfig.NetworkMode.Equals("default", StringComparison.OrdinalIgnoreCase) && !request.HostConfig.NetworkMode.Equals("bridge", StringComparison.OrdinalIgnoreCase)) throw new DockerApiException(StatusCodes.Status501NotImplemented, "Only the default bridge network mode is supported by the WSLC Docker socket.");
+        // "host"/"none" have no WSLC equivalent, and "container:<id>" (sharing another container's network
+        // namespace) has no --network argument that maps onto it; a user-defined network name, however, is
+        // passed straight through to wslc's own --network flag below.
+        if (request.HostConfig?.NetworkMode is { Length: > 0 } networkMode
+            && (networkMode.Equals("host", StringComparison.OrdinalIgnoreCase)
+                || networkMode.Equals("none", StringComparison.OrdinalIgnoreCase)
+                || networkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new DockerApiException(StatusCodes.Status501NotImplemented,
+                $"Network mode '{networkMode}' is not supported by the WSLC Docker socket.");
+        }
         if (request.HostConfig?.Binds is { Length: > 0 } || request.HostConfig?.Mounts is { Count: > 0 } || request.HostConfig?.Tmpfs is { Count: > 0 })
         {
             var isSoleDockerSocketBind = DockerSocketMount.IsSoleDockerSocketBind(request.HostConfig);
@@ -709,8 +825,63 @@ internal sealed class WslcDockerEngine : IDisposable
             if (dockerSocketMountDockerHost is null) throw new DockerApiException(StatusCodes.Status501NotImplemented, "Docker socket mounts are only supported when WSLC_DOCKER_SOCKET_DISABLE_HYPERV_TCP is not set to true, so the container can reach this engine over TCP instead of a mounted socket.");
         }
 
-        if (request.NetworkingConfig?.EndpointsConfig is { Count: > 0 }) throw new DockerApiException(StatusCodes.Status501NotImplemented, "Custom Docker networks are not supported by the WSLC Docker socket yet.");
+        if (request.NetworkingConfig?.EndpointsConfig is { Count: > 1 }) throw new DockerApiException(StatusCodes.Status501NotImplemented, "Attaching to more than one network at creation time is not supported by the WSLC Docker socket.");
+        if (ReadNetworkAttachment(request)?.Links is { Count: > 0 }) throw new DockerApiException(StatusCodes.Status501NotImplemented, "Container links are not supported by the WSLC Docker socket.");
+        if (ReadNetworkAttachment(request)?.IPv6Address is { Length: > 0 }) throw new DockerApiException(StatusCodes.Status501NotImplemented, "Assigning an IPv6 address at container creation is not supported by the WSLC Docker socket yet.");
     }
+
+    private readonly record struct DockerNetworkAttachment(string NetworkName, string? IPv4Address, string? IPv6Address, IReadOnlyList<string> Aliases, IReadOnlyList<string> Links);
+
+    /// <summary>
+    /// Resolves the single network a create request asks to attach to, from whichever of Docker's two
+    /// overlapping ways of expressing it the client used: <c>HostConfig.NetworkMode</c> names a network with no
+    /// further per-endpoint detail, while <c>NetworkingConfig.EndpointsConfig</c> keys on the network name and
+    /// carries the IP/alias/link detail for it. <see cref="RejectUnsupportedConfiguration"/> already rules out
+    /// <c>NetworkMode</c> values ("host", "none", "container:...") that aren't a plain network name by this point.
+    /// </summary>
+    private static DockerNetworkAttachment? ReadNetworkAttachment(DockerCreateContainerRequest request)
+    {
+        var networkMode = request.HostConfig?.NetworkMode;
+        var fromNetworkMode = !string.IsNullOrWhiteSpace(networkMode)
+            && !networkMode.Equals("default", StringComparison.OrdinalIgnoreCase)
+            && !networkMode.Equals("bridge", StringComparison.OrdinalIgnoreCase)
+            ? networkMode
+            : null;
+
+        if (request.NetworkingConfig?.EndpointsConfig is not { Count: 1 } endpoints)
+        {
+            return fromNetworkMode is null ? null : new DockerNetworkAttachment(fromNetworkMode, null, null, [], []);
+        }
+
+        var entry = endpoints.Single();
+        var endpointConfig = entry.Value is JsonElement { ValueKind: JsonValueKind.Object } element ? element : default;
+        return new DockerNetworkAttachment(
+            entry.Key,
+            ReadEndpointConfigString(endpointConfig, "IPAMConfig", "IPv4Address"),
+            ReadEndpointConfigString(endpointConfig, "IPAMConfig", "IPv6Address"),
+            ReadEndpointConfigStringArray(endpointConfig, "Aliases"),
+            ReadEndpointConfigStringArray(endpointConfig, "Links"));
+    }
+
+    private static string? ReadEndpointConfigString(JsonElement endpointConfig, string objectName, string propertyName) =>
+        endpointConfig.ValueKind == JsonValueKind.Object
+        && endpointConfig.TryGetProperty(objectName, out var inner)
+        && inner.ValueKind == JsonValueKind.Object
+        && inner.TryGetProperty(propertyName, out var value)
+        && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
+    private static IReadOnlyList<string> ReadEndpointConfigStringArray(JsonElement endpointConfig, string propertyName) =>
+        endpointConfig.ValueKind == JsonValueKind.Object
+        && endpointConfig.TryGetProperty(propertyName, out var value)
+        && value.ValueKind == JsonValueKind.Array
+            ?
+            [
+                .. value.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String)
+                    .Select(item => item.GetString() ?? string.Empty),
+            ]
+            : [];
 
     private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
 }

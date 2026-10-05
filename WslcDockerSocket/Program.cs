@@ -1,20 +1,21 @@
-using System.IO.Pipes;
 using System.Net;
-using System.Security.AccessControl;
-using System.Security.Principal;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
-using Microsoft.AspNetCore.Server.Kestrel.Transport.NamedPipes;
 using Microsoft.Extensions.Options;
+#if DEBUG
 using Microsoft.OpenApi;
+#endif
 using WslcDockerSocket.Api;
 using WslcDockerSocket.Engine;
 using WslcDockerSocket.Hosting;
 
+// Checked and acted on before WebApplication.CreateBuilder so the console window never becomes visible at
+// all in tray-icon mode, rather than flashing on screen and then disappearing.
+var trayIconMode = ConsoleTrayIcon.IsRequested(args);
+if (trayIconMode) ConsoleTrayIcon.HideConsoleWindow();
+
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Configuration.AddJsonFile("appsettings.user.json", optional: true, reloadOnChange: true);
-
-builder.Host.UseWindowsService(options => options.ServiceName = "wslc-docker-socket");
 
 var socketOptions = DockerSocketOptions.From(builder.Configuration);
 
@@ -34,13 +35,15 @@ builder.Services.AddSingleton<IConfigureOptions<KestrelServerOptions>>(provider 
         provider.GetRequiredService<DockerExecHijackConnectionHandler>(),
         (options, execHijackHandler) =>
         {
-            void configure(ListenOptions listener) =>
+            void Configure(ListenOptions listener) =>
                 listener.Use(next => connection => execHijackHandler.HandleAsync(connection, next));
 
-            if (socketOptions.EnableTcp) options.ListenLocalhost(socketOptions.TcpPort, configure);
-            if (hyperVTcpAddress is not null) options.Listen(new IPEndPoint(hyperVTcpAddress, socketOptions.TcpPort), configure);
-            if (!socketOptions.DisableNamedPipe) options.ListenNamedPipe(socketOptions.NamedPipe, configure);
+            if (socketOptions.EnableTcp) options.ListenLocalhost(socketOptions.TcpPort, Configure);
+            if (hyperVTcpAddress is not null) options.Listen(new IPEndPoint(hyperVTcpAddress, socketOptions.TcpPort), Configure);
+            if (!socketOptions.DisableNamedPipe) options.ListenNamedPipe(socketOptions.NamedPipe, Configure);
         }));
+
+/*builder.Host.UseWindowsService(options => options.ServiceName = "wslc-docker-socket");
 
 builder.Services.PostConfigure<NamedPipeTransportOptions>(options =>
 {
@@ -56,7 +59,7 @@ builder.Services.PostConfigure<NamedPipeTransportOptions>(options =>
         AccessControlType.Allow));
 
     options.PipeSecurity = security;
-});
+});*/
 
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
@@ -67,6 +70,7 @@ builder.Services.AddSingleton(provider => new WslcDockerEngine(new WslcCommandRu
     new WslRuntimeDiagnosticsProvider(), provider.GetRequiredService<DockerSocketMountAdvertisement>()));
 builder.Services.AddSingleton<DockerExecHijackConnectionHandler>();
 
+#if DEBUG
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
     options.SwaggerDoc("v1", new OpenApiInfo
@@ -75,22 +79,29 @@ builder.Services.AddSwaggerGen(options =>
         Version = "v1",
         Description = "Docker Remote API compatibility surface backed by Microsoft WSL Containers.",
     }));
+#endif
 
 var app = builder.Build();
 
 app.Lifetime.ApplicationStopping.Register(app.Services.GetRequiredService<WslcDockerEngine>().Dispose);
+
+// Console behavior is otherwise unchanged; pass --type=trayIcon to run headless behind a tray icon instead.
+var trayIcon = trayIconMode ? ConsoleTrayIcon.Start(app.Lifetime) : null;
+if (trayIcon is not null) app.Lifetime.ApplicationStopping.Register(trayIcon.Dispose);
 
 // The version prefix must move into PathBase before routing, so UseRouting is placed explicitly:
 // WebApplication would otherwise match endpoints ahead of all application middleware.
 app.UseDockerApiVersionPathBase();
 app.UseDockerApiExceptionHandler();
 app.UseRouting();
+#if DEBUG
 app.UseSwagger();
 app.UseSwaggerUI(options =>
 {
     options.DocumentTitle = "WSLC Docker Socket API";
     options.SwaggerEndpoint("/swagger/v1/swagger.json", "WSLC Docker Socket API v1");
 });
+#endif
 app.MapDockerApi();
 app.Run();
 

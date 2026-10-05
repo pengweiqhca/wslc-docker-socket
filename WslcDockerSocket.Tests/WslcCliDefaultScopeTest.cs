@@ -282,6 +282,236 @@ public sealed class WslcCliDefaultScopeTest
     }
 
     [Fact]
+    public async Task NetworkCreateUsesVerifiedUnqualifiedCliVectorAndReturnsTheCreatedId()
+    {
+        var runner = new RecordingRunner(command => command.Take(2).SequenceEqual(["network", "create"])
+            ? new WslcCommandResult(string.Empty, string.Empty, 0)
+            : command.SequenceEqual(["network", "list", "--format", "json"])
+                ? new WslcCommandResult("{\"Name\":\"demo-net\",\"Id\":\"net-1\"}", string.Empty, 0)
+                : command.SequenceEqual(["network", "inspect", "demo-net", "--format", "json"])
+                    ? new WslcCommandResult("[{\"Id\":\"net-1\",\"Name\":\"demo-net\"}]", string.Empty, 0)
+                    : throw new Xunit.Sdk.XunitException($"Unexpected command: {string.Join(' ', command)}"));
+        using var engine = new WslcDockerEngine(runner, new WslRuntimeDiagnosticsProvider());
+
+        var (id, warning) = await engine.CreateNetworkAsync(new DockerCreateNetworkRequest
+        {
+            Name = "demo-net",
+            Driver = "bridge",
+            Internal = true,
+            IPAM = new DockerNetworkIpam
+            {
+                Config = [new DockerNetworkIpamConfig { Subnet = "172.30.0.0/24", Gateway = "172.30.0.1" }],
+            },
+            Labels = new Dictionary<string, string> { ["purpose"] = "test" },
+        }, TestContext.Current.CancellationToken);
+
+        Assert.Equal("net-1", id);
+        Assert.Equal(string.Empty, warning);
+        Assert.Equal(
+            ["network", "create", "--driver", "bridge", "--internal", "--subnet", "172.30.0.0/24", "--gateway", "172.30.0.1", "--label", "purpose=test", "demo-net"],
+            runner.Commands[0]);
+        AssertDefaultScope(runner);
+    }
+
+    [Fact]
+    public async Task NetworkCreateRejectsAttachableBeforeRunningAnyCliCommand()
+    {
+        var runner = new RecordingRunner(new WslcCommandResult(string.Empty, string.Empty, 0));
+        using var engine = new WslcDockerEngine(runner, new WslRuntimeDiagnosticsProvider());
+
+        var exception = await Assert.ThrowsAsync<DockerApiException>(() => engine.CreateNetworkAsync(
+            new DockerCreateNetworkRequest { Name = "demo-net", Attachable = true },
+            TestContext.Current.CancellationToken));
+
+        Assert.Equal(StatusCodes.Status501NotImplemented, exception.StatusCode);
+        Assert.Empty(runner.Commands);
+    }
+
+    [Fact]
+    public async Task NetworkConnectUsesVerifiedUnqualifiedCliVector()
+    {
+        var runner = new RecordingRunner(command => command.SequenceEqual(["network", "list", "--format", "json"])
+            ? new WslcCommandResult("{\"Name\":\"demo-net\",\"Id\":\"net-1\"}", string.Empty, 0)
+            : command.SequenceEqual(["network", "inspect", "demo-net", "--format", "json"])
+                ? new WslcCommandResult("[{\"Id\":\"net-1\",\"Name\":\"demo-net\"}]", string.Empty, 0)
+                : command.SequenceEqual(["container", "list", "-a", "--format", "json"])
+                    ? new WslcCommandResult("{\"Id\":\"container-1\",\"Name\":\"demo\",\"Image\":\"redis\",\"State\":2}", string.Empty, 0)
+                    : command.SequenceEqual(["network", "connect", "--ip", "172.30.0.5", "--network-alias", "db", "demo-net", "container-1"])
+                        ? new WslcCommandResult(string.Empty, string.Empty, 0)
+                        : throw new Xunit.Sdk.XunitException($"Unexpected command: {string.Join(' ', command)}"));
+        using var engine = new WslcDockerEngine(runner, new WslRuntimeDiagnosticsProvider());
+
+        await engine.ConnectNetworkAsync("demo-net", new DockerNetworkConnectRequest
+        {
+            Container = "container-1",
+            EndpointConfig = new DockerNetworkEndpointConfig
+            {
+                Aliases = ["db"],
+                IPAMConfig = new DockerNetworkEndpointIpamConfig { IPv4Address = "172.30.0.5" },
+            },
+        }, TestContext.Current.CancellationToken);
+
+        AssertDefaultScope(runner);
+    }
+
+    [Fact]
+    public async Task NetworkDisconnectUsesVerifiedUnqualifiedCliVector()
+    {
+        var runner = new RecordingRunner(command => command.SequenceEqual(["network", "list", "--format", "json"])
+            ? new WslcCommandResult("{\"Name\":\"demo-net\",\"Id\":\"net-1\"}", string.Empty, 0)
+            : command.SequenceEqual(["network", "inspect", "demo-net", "--format", "json"])
+                ? new WslcCommandResult("[{\"Id\":\"net-1\",\"Name\":\"demo-net\"}]", string.Empty, 0)
+                : command.SequenceEqual(["container", "list", "-a", "--format", "json"])
+                    ? new WslcCommandResult("{\"Id\":\"container-1\",\"Name\":\"demo\",\"Image\":\"redis\",\"State\":2}", string.Empty, 0)
+                    : command.SequenceEqual(["network", "disconnect", "demo-net", "container-1"])
+                        ? new WslcCommandResult(string.Empty, string.Empty, 0)
+                        : throw new Xunit.Sdk.XunitException($"Unexpected command: {string.Join(' ', command)}"));
+        using var engine = new WslcDockerEngine(runner, new WslRuntimeDiagnosticsProvider());
+
+        await engine.DisconnectNetworkAsync("demo-net",
+            new DockerNetworkDisconnectRequest { Container = "container-1" },
+            TestContext.Current.CancellationToken);
+
+        AssertDefaultScope(runner);
+    }
+
+    [Fact]
+    public async Task CreateWithNetworkModeAttachesToTheNamedNetwork()
+    {
+        var runner = new RecordingRunner(command => command.Take(2).SequenceEqual(["container", "create"])
+            ? new WslcCommandResult("created-1\n", string.Empty, 0)
+            : command.SequenceEqual(["container", "list", "-a", "--format", "json"])
+                ? new WslcCommandResult("{\"Id\":\"created-1\",\"Name\":\"demo\",\"Image\":\"docker.io/library/alpine:latest\",\"State\":1}", string.Empty, 0)
+                : throw new Xunit.Sdk.XunitException($"Unexpected command: {string.Join(' ', command)}"));
+        using var engine = new WslcDockerEngine(runner, new WslRuntimeDiagnosticsProvider());
+
+        await engine.CreateContainerAsync("demo", new DockerCreateContainerRequest
+        {
+            Image = "alpine",
+            HostConfig = new DockerHostConfig { NetworkMode = "demo-net" },
+        }, TestContext.Current.CancellationToken);
+
+        Assert.Equal(["container", "create", "--name", "demo", "--network", "demo-net", "docker.io/library/alpine:latest"], runner.Commands[0]);
+        AssertDefaultScope(runner);
+    }
+
+    [Fact]
+    public async Task CreateWithEndpointsConfigAttachesWithIpAndAlias()
+    {
+        var runner = new RecordingRunner(command => command.Take(2).SequenceEqual(["container", "create"])
+            ? new WslcCommandResult("created-1\n", string.Empty, 0)
+            : command.SequenceEqual(["container", "list", "-a", "--format", "json"])
+                ? new WslcCommandResult("{\"Id\":\"created-1\",\"Name\":\"demo\",\"Image\":\"docker.io/library/alpine:latest\",\"State\":1}", string.Empty, 0)
+                : throw new Xunit.Sdk.XunitException($"Unexpected command: {string.Join(' ', command)}"));
+        using var engine = new WslcDockerEngine(runner, new WslRuntimeDiagnosticsProvider());
+
+        await engine.CreateContainerAsync("demo", new DockerCreateContainerRequest
+        {
+            Image = "alpine",
+            NetworkingConfig = new DockerNetworkingConfig
+            {
+                EndpointsConfig = new Dictionary<string, object>
+                {
+                    ["demo-net"] = JsonSerializer.SerializeToElement(new
+                    {
+                        IPAMConfig = new { IPv4Address = "172.30.0.9" },
+                        Aliases = new[] { "db" },
+                    }),
+                },
+            },
+        }, TestContext.Current.CancellationToken);
+
+        Assert.Equal(
+            ["container", "create", "--name", "demo", "--network", "demo-net", "--ip", "172.30.0.9", "--network-alias", "db", "docker.io/library/alpine:latest"],
+            runner.Commands[0]);
+        AssertDefaultScope(runner);
+    }
+
+    [Fact]
+    public async Task CreateWithContainerLinksFailsFastInsteadOfSilentlyIgnoringThem()
+    {
+        var runner = new RecordingRunner(new WslcCommandResult(string.Empty, string.Empty, 0));
+        using var engine = new WslcDockerEngine(runner, new WslRuntimeDiagnosticsProvider());
+
+        var exception = await Assert.ThrowsAsync<DockerApiException>(() => engine.CreateContainerAsync("demo", new DockerCreateContainerRequest
+        {
+            Image = "alpine",
+            NetworkingConfig = new DockerNetworkingConfig
+            {
+                EndpointsConfig = new Dictionary<string, object>
+                {
+                    ["demo-net"] = JsonSerializer.SerializeToElement(new { Links = new[] { "other:alias" } }),
+                },
+            },
+        }, TestContext.Current.CancellationToken));
+
+        Assert.Equal(StatusCodes.Status501NotImplemented, exception.StatusCode);
+        Assert.Empty(runner.Commands);
+    }
+
+    [Theory]
+    [InlineData("host")]
+    [InlineData("none")]
+    [InlineData("container:other-id")]
+    public async Task CreateWithUnsupportedNetworkModeFailsFastInsteadOfSilentlyIgnoringIt(string networkMode)
+    {
+        var runner = new RecordingRunner(new WslcCommandResult(string.Empty, string.Empty, 0));
+        using var engine = new WslcDockerEngine(runner, new WslRuntimeDiagnosticsProvider());
+
+        var exception = await Assert.ThrowsAsync<DockerApiException>(() => engine.CreateContainerAsync("demo", new DockerCreateContainerRequest
+        {
+            Image = "alpine",
+            HostConfig = new DockerHostConfig { NetworkMode = networkMode },
+        }, TestContext.Current.CancellationToken));
+
+        Assert.Equal(StatusCodes.Status501NotImplemented, exception.StatusCode);
+        Assert.Empty(runner.Commands);
+    }
+
+    [Fact]
+    public async Task RestartUsesVerifiedUnqualifiedCliVectorWithTimeout()
+    {
+        var runner = new RecordingRunner(command => command.SequenceEqual(["container", "list", "-a", "--format", "json"])
+            ? new WslcCommandResult("{\"Id\":\"container-1\",\"Name\":\"demo\",\"Image\":\"redis\",\"State\":2}", string.Empty, 0)
+            : command.SequenceEqual(["container", "restart", "--timeout", "5", "container-1"])
+                ? new WslcCommandResult(string.Empty, string.Empty, 0)
+                : throw new Xunit.Sdk.XunitException($"Unexpected command: {string.Join(' ', command)}"));
+        using var engine = new WslcDockerEngine(runner, new WslRuntimeDiagnosticsProvider());
+
+        await engine.RestartContainerAsync("container-1", 5, TestContext.Current.CancellationToken);
+
+        Assert.Equal(2, runner.Commands.Count);
+        AssertDefaultScope(runner);
+    }
+
+    [Fact]
+    public async Task RestartWithoutATimeoutOmitsTheFlag()
+    {
+        var runner = new RecordingRunner(command => command.SequenceEqual(["container", "list", "-a", "--format", "json"])
+            ? new WslcCommandResult("{\"Id\":\"container-1\",\"Name\":\"demo\",\"Image\":\"redis\",\"State\":3}", string.Empty, 0)
+            : command.SequenceEqual(["container", "restart", "container-1"])
+                ? new WslcCommandResult(string.Empty, string.Empty, 0)
+                : throw new Xunit.Sdk.XunitException($"Unexpected command: {string.Join(' ', command)}"));
+        using var engine = new WslcDockerEngine(runner, new WslRuntimeDiagnosticsProvider());
+
+        await engine.RestartContainerAsync("container-1", null, TestContext.Current.CancellationToken);
+
+        AssertDefaultScope(runner);
+    }
+
+    [Fact]
+    public async Task RestartOfAMissingContainerReportsThatItDoesNotExist()
+    {
+        var runner = new RecordingRunner(new WslcCommandResult(string.Empty, string.Empty, 0));
+        using var engine = new WslcDockerEngine(runner, new WslRuntimeDiagnosticsProvider());
+
+        var exception = await Assert.ThrowsAsync<DockerApiException>(() =>
+            engine.RestartContainerAsync("not-created", null, TestContext.Current.CancellationToken));
+
+        Assert.Equal(StatusCodes.Status404NotFound, exception.StatusCode);
+    }
+
+    [Fact]
     public async Task StopSucceedsWhenWslcAutoRemoveDeletesTheContainer()
     {
         var removed = false;

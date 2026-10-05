@@ -6,7 +6,7 @@
 > WSLC and this adapter are both experimental. Treat this as a local development tool.
 
 > [!NOTE]
-> Verified against **WSLC 2.9.11**. WSLC's CLI output is still changing between releases, so re-verify after upgrading.
+> Verified against **WSLC 3.0.1** (the first general-availability release). WSLC's CLI output is still changing between releases, so re-verify after upgrading.
 >
 > The service declares Docker API **1.43** (`MinAPIVersion` 1.24) and accepts any `/v{major}.{minor}` prefix, so clients negotiating newer versions (1.44, 1.51, …) still work.
 
@@ -33,12 +33,19 @@ If you change the pipe name, point clients at it explicitly:
 $env:DOCKER_HOST = 'npipe://./pipe/my-pipe-name'
 ```
 
+Pass `--type=trayIcon` to run without a visible console window, behind a system tray icon instead. Console-mode behavior (logging, listeners, everything else) is otherwise unchanged; the icon's context menu can show the console window again or exit the app.
+
+```pwsh
+dotnet run --project WslcDockerSocket/WslcDockerSocket.csproj --configuration Release -- --type=trayIcon
+```
+
 ---
 
 ## Key Features
 
 - **Drop-in pipe name.** Listens on Docker's conventional named pipe by default; loopback TCP is opt-in.
-- **Container lifecycle.** Create, start, stop, wait, delete, list, inspect, logs, exec, and archive upload.
+- **Container lifecycle.** Create, start, stop, restart, wait, delete, list, inspect, logs, exec, and archive upload.
+- **User-defined networks.** Create, connect, disconnect, and delete networks beyond the default bridge.
 - **Real image metadata.** Image listings report exact byte sizes and creation timestamps, not WSLC's rounded display text.
 - **Docker-shaped listings.** `/containers/json` reports published ports and the container's bridge IP, so UIs like Portainer populate those columns.
 - **Automatic host ports.** A client asking for an ephemeral published port gets a real free port allocated for it.
@@ -50,7 +57,7 @@ $env:DOCKER_HOST = 'npipe://./pipe/my-pipe-name'
 
 ## Requirements
 
-- Windows with a working WSLC runtime and `wslc` available on `PATH`. Verified against **WSLC 2.9.11** (`wslc version`); WSLC 2.9.10 and newer are the primary target, and the container listing also still reads the pre-2.9.10 output.
+- Windows with a working WSLC runtime and `wslc` available on `PATH`. Verified against **WSLC 3.0.1** (`wslc version`); WSLC 2.9.10 and newer are the primary target, and the container listing also still reads the pre-2.9.10 output.
 - **To run a published build:** the ASP.NET Core 10 runtime or newer. Release archives are framework-dependent, so they need `Microsoft.AspNetCore.App` installed, not just the base .NET runtime; the app rolls forward across major versions.
 - **To build from source:** .NET SDK 10.0.100 or newer (pinned by `global.json`, `rollForward: latestMinor`).
 - A real WSLC installation for the Testcontainers tests; the unit and HTTP contract tests do not need one.
@@ -102,10 +109,10 @@ Available on both unversioned and `/v{major}.{minor}` paths:
 | --- | --- |
 | System | `GET/HEAD /_ping`, `GET /version`, `GET /info` |
 | Images | `GET /images/json`, `GET /images/{name}/json`, `POST /images/create` |
-| Containers | `POST /containers/create`, `.../start`, `.../stop`, `.../wait`, `GET /containers/json`, `GET /containers/{id}/json`, `GET /containers/{id}/logs`, `PUT /containers/{id}/archive`, `DELETE /containers/{id}` |
+| Containers | `POST /containers/create`, `.../start`, `.../stop`, `.../restart`, `.../wait`, `GET /containers/json`, `GET /containers/{id}/json`, `GET /containers/{id}/logs`, `PUT /containers/{id}/archive`, `DELETE /containers/{id}` |
 | Exec | `POST /containers/{id}/exec`, `POST /exec/{id}/start`, `GET /exec/{id}/json` |
 | Volumes | `GET /volumes`, `GET /volumes/{name}` |
-| Networks | `GET /networks`, `GET /networks/{id}` |
+| Networks | `GET /networks`, `GET /networks/{id}`, `POST /networks/create`, `POST /networks/{id}/connect`, `POST /networks/{id}/disconnect`, `DELETE /networks/{id}` |
 
 `GET /version` reports this adapter's assembly version plus its Docker API range. That range is a capability declaration, not a probe of a Docker daemon. `GET /info` reports counts from live WSLC state and best-effort local probes (`wslc version`, the default distribution's kernel release, and `/proc/meminfo`); a failed probe yields an empty string or zero rather than a fabricated value.
 
@@ -122,7 +129,9 @@ These return a Docker-style `501 Not Implemented` with the reason in the message
 | `GET /images/{name}/history` | WSLC reports no per-layer build history. Inspect exposes only layer digests, without the per-layer command, size, or timestamp Docker's response requires. |
 | Bind, volume, and tmpfs mounts | Mount semantics are not mapped. |
 | Docker-socket mounts | Unsupported in general; only the sole `/var/run/docker.sock` mount shape is translated to `DOCKER_HOST=tcp://...` unless `WSLC_DOCKER_SOCKET_DISABLE_HYPERV_TCP=true`. |
-| Network create/delete/connect/disconnect, non-default network modes | Only the default bridge network is available. |
+| `host`/`none` network modes, `container:<id>` network sharing | wslc has no equivalent to joining another container's network namespace or opting out of networking entirely. |
+| Attaching to more than one network at container creation, container links (`Links`), IPv6 endpoint addresses | wslc's `container create`/`network connect` take a single `--network`/`--ip`/`--network-alias` set; it has no `--link` equivalent for `container create` and no IPv6 address assignment option. |
+| Attachable or IPv6-enabled custom networks, more than one IPAM config block per network | `wslc network create` has no `--attachable` or `--ipv6` switch, and only a single `--subnet`/`--gateway`/`--ip-range` set. |
 | TTY containers | Not supported. |
 | `POST /containers/{id}/attach` | Not implemented, with or without stdin. Use `GET /containers/{id}/logs` for output. |
 | Multiple host bindings per container port, host-IP-specific and IPv6 bindings, protocols other than TCP/UDP | WSLC publishing cannot express them. |
@@ -171,6 +180,10 @@ Note that a logon task only helps after logon. An adapter started as a service a
 **Streaming boundaries.** Container output uses Docker's raw multiplexed stream. `GET /containers/{id}/logs` is the supported output path: it honours `stdout` and `stderr`, and with `follow=1` it forwards `wslc container logs --follow` as a chunked raw stream. Exec output is collected before the response is sent and capped at 16 MiB per stream, so exec start is not yet live streaming. Output subscriptions are bounded; a consumer that cannot keep up is disconnected rather than letting memory grow.
 
 **Lifecycle ownership.** Containers remain WSLC workloads after the adapter stops. Shutdown releases the adapter's own handles without deleting containers or terminating a WSLC session, so it can run as a long-lived management endpoint rather than only as a test helper.
+
+**Restart.** `POST /containers/{id}/restart` maps straight onto `wslc container restart`, which (like Docker's own restart) stops and starts the container regardless of its current state; Docker's `t` query parameter becomes `--timeout`.
+
+**User-defined networks.** WSLC 3.0 added real `network create`/`connect`/`disconnect` commands, so these are no longer limited to the default bridge network. `POST /networks/create` maps `Driver`, `Internal`, and the first `IPAM.Config` entry's `Subnet`/`Gateway`/`IPRange` onto `wslc network create`'s matching flags. A container can join exactly one additional network at creation time, through either `HostConfig.NetworkMode` (just the name) or `NetworkingConfig.EndpointsConfig` (name plus its `IPAMConfig.IPv4Address` and `Aliases`), both translating to `--network`/`--ip`/`--network-alias` on `container create`. `POST /networks/{id}/connect` and `.../disconnect` map onto the equivalent `wslc network connect`/`disconnect` commands after resolving the network and container by id or name.
 
 ---
 
