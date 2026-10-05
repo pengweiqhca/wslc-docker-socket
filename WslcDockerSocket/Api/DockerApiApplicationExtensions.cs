@@ -136,6 +136,13 @@ internal static partial class DockerApiApplicationExtensions
                 await engine.StopContainerAsync(id, ct).ConfigureAwait(false)
                     ? StatusCodes.Status204NoContent
                     : StatusCodes.Status304NotModified));
+        app.MapPost("/containers/{id}/restart",
+            async (string id, HttpContext context, WslcDockerEngine engine, CancellationToken ct) =>
+            {
+                await engine.RestartContainerAsync(id, DockerQuery.ReadInt32(context.Request.Query, "t"), ct)
+                    .ConfigureAwait(false);
+                return Results.StatusCode(StatusCodes.Status204NoContent);
+            });
         app.MapPost("/containers/{id}/wait",
             async (string id, HttpContext context, WslcDockerEngine engine, CancellationToken ct) =>
                 await engine.WaitForContainerAsync(id, context.Response, ct).ConfigureAwait(false));
@@ -191,8 +198,23 @@ internal static partial class DockerApiApplicationExtensions
             async (string id, WslcDockerEngine engine, CancellationToken ct) =>
                 Results.Json(await engine.InspectNetworkAsync(id, ct).ConfigureAwait(false)));
         app.MapPost("/networks/create",
-            () => DockerResults.Error(StatusCodes.Status501NotImplemented,
-                "Custom Docker networks are not supported by the WSLC Docker socket yet."));
+            async (DockerCreateNetworkRequest request, WslcDockerEngine engine, CancellationToken ct) =>
+            {
+                var (id, warning) = await engine.CreateNetworkAsync(request, ct).ConfigureAwait(false);
+                return Results.Json(new { Id = id, Warning = warning }, statusCode: StatusCodes.Status201Created);
+            });
+        app.MapPost("/networks/{id}/connect",
+            async (string id, DockerNetworkConnectRequest request, WslcDockerEngine engine, CancellationToken ct) =>
+            {
+                await engine.ConnectNetworkAsync(id, request, ct).ConfigureAwait(false);
+                return Results.StatusCode(StatusCodes.Status200OK);
+            });
+        app.MapPost("/networks/{id}/disconnect",
+            async (string id, DockerNetworkDisconnectRequest request, WslcDockerEngine engine, CancellationToken ct) =>
+            {
+                await engine.DisconnectNetworkAsync(id, request, ct).ConfigureAwait(false);
+                return Results.StatusCode(StatusCodes.Status200OK);
+            });
         app.MapDelete("/networks/{id}", async (string id, WslcDockerEngine engine, CancellationToken ct) =>
         {
             await engine.DeleteNetworkAsync(id, ct).ConfigureAwait(false);
@@ -313,6 +335,15 @@ internal static class DockerQuery
         if (value is "1" || value.Equals("true", StringComparison.OrdinalIgnoreCase)) return true;
         if (value is "0" || value.Equals("false", StringComparison.OrdinalIgnoreCase)) return false;
         throw new DockerApiException(StatusCodes.Status400BadRequest, $"Invalid boolean query parameter '{name}'.");
+    }
+
+    public static int? ReadInt32(IQueryCollection query, string name)
+    {
+        var value = query[name].ToString();
+        if (string.IsNullOrEmpty(value)) return null;
+        return int.TryParse(value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsed)
+            ? parsed
+            : throw new DockerApiException(StatusCodes.Status400BadRequest, $"Invalid integer query parameter '{name}'.");
     }
 }
 

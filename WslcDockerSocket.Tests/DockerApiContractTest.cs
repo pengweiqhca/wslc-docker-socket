@@ -37,7 +37,7 @@ public sealed class DockerApiContractTest(IHttpClientFactory factory)
 
     [Theory]
     [InlineData("Binds", "Bind mounts")]
-    [InlineData("NetworkMode", "default bridge network")]
+    [InlineData("NetworkMode", "Network mode 'host' is not supported")]
     [InlineData("Tty", "TTY containers")]
     public async Task CreateWithUnsupportedOptionFailsFastInsteadOfClaimingSupport(string option, string message)
     {
@@ -66,6 +66,50 @@ public sealed class DockerApiContractTest(IHttpClientFactory factory)
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
         await AssertDockerErrorAsync(response, message, ct);
+    }
+
+    [Fact]
+    public async Task RestartOfAMissingContainerReturnsDockerNotFound()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var response = await _client.PostAsync("/v1.43/containers/not-created/restart?t=5", null, ct);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        await AssertDockerErrorAsync(response, "No such container: not-created", ct);
+    }
+
+    [Fact]
+    public async Task NetworkCreateWithoutANameReturnsDockerBadRequest()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var response = await _client.PostAsync("/v1.43/networks/create", JsonContent.Create(new { }), ct);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        await AssertDockerErrorAsync(response, "Name is required", ct);
+    }
+
+    [Theory]
+    [InlineData("/v1.43/networks/not-created/connect")]
+    [InlineData("/v1.43/networks/not-created/disconnect")]
+    public async Task ConnectAndDisconnectOnAMissingNetworkReturnDockerNotFound(string path)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var response = await _client.PostAsync(path, JsonContent.Create(new { Container = "any" }), ct);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        await AssertDockerErrorAsync(response, "No such network: not-created", ct);
+    }
+
+    [Theory]
+    [InlineData("/v1.43/networks/not-created/connect")]
+    [InlineData("/v1.43/networks/not-created/disconnect")]
+    public async Task ConnectAndDisconnectWithoutAContainerReturnDockerBadRequest(string path)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var response = await _client.PostAsync(path, JsonContent.Create(new { }), ct);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        await AssertDockerErrorAsync(response, "Container is required", ct);
     }
 
     [Fact]
