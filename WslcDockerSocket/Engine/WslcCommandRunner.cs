@@ -16,6 +16,9 @@ internal interface IWslcCommandRunner
 
     Task StreamAsync(IReadOnlyList<string> command, Func<DockerOutputFrame, CancellationToken, ValueTask> writeFrameAsync,
         CancellationToken ct);
+
+    Task StreamLinesAsync(IReadOnlyList<string> command, Func<string, CancellationToken, ValueTask> writeLineAsync,
+        CancellationToken ct);
 }
 
 internal readonly record struct WslcCommandResult(string StandardOutput, string StandardError, int ExitCode);
@@ -170,6 +173,87 @@ internal sealed class WslcCommandRunner(string? session = null) : IWslcCommandRu
         {
             throw new DockerApiException(StatusCodes.Status500InternalServerError,
                 $"wslc {string.Join(' ', command)} failed with exit code {process.ExitCode}.");
+        }
+    }
+
+    /// <summary>
+    /// Streams a long-running command line by line (e.g. <c>wslc events</c>), instead of the raw byte chunks
+    /// <see cref="StreamAsync"/> hands to Docker's stream-multiplex frames. Lines are well-formed structured
+    /// text here, so splitting on them up front — rather than leaving partial-line reassembly to the caller —
+    /// keeps the line-oriented shape out of the engine layer.
+    /// </summary>
+    public async Task StreamLinesAsync(IReadOnlyList<string> command,
+        Func<string, CancellationToken, ValueTask> writeLineAsync, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        ArgumentNullException.ThrowIfNull(writeLineAsync);
+        using var process = Start(BuildArguments(command, session));
+        var forwardingFailure = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var standardOutput = PumpLinesAsync(process.StandardOutput, writeLineAsync, forwardingFailure, ct);
+        var standardError = ReadBoundedAsync(process.StandardError);
+        var processExited = process.WaitForExitAsync(CancellationToken.None);
+        var cancellation = Task.Delay(Timeout.InfiniteTimeSpan, ct);
+
+        if (await Task.WhenAny(processExited, forwardingFailure.Task, cancellation).ConfigureAwait(false) != processExited)
+        {
+            Kill(process);
+        }
+
+        await processExited.ConfigureAwait(false);
+        await standardOutput.ConfigureAwait(false);
+        var error = await standardError.ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
+        if (forwardingFailure.Task.IsCompleted)
+        {
+            ExceptionDispatchInfo.Capture(await forwardingFailure.Task.ConfigureAwait(false)).Throw();
+        }
+
+        if (process.ExitCode != 0)
+        {
+            throw new DockerApiException(StatusCodes.Status500InternalServerError,
+                $"wslc {string.Join(' ', command)} failed with exit code {process.ExitCode}: {error.Value.Trim()}");
+        }
+    }
+
+    private static async Task PumpLinesAsync(StreamReader source, Func<string, CancellationToken, ValueTask> writeLineAsync,
+        TaskCompletionSource<Exception> forwardingFailure, CancellationToken ct)
+    {
+        try
+        {
+            while (true)
+            {
+                var line = await source.ReadLineAsync(CancellationToken.None).ConfigureAwait(false);
+                if (line is null)
+                {
+                    return;
+                }
+
+                if (ct.IsCancellationRequested || forwardingFailure.Task.IsCompleted)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    await writeLineAsync(line, ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    // The parent kills the child; this pump continues draining stdout to EOF.
+                }
+                catch (Exception exception)
+                {
+                    forwardingFailure.TrySetResult(exception);
+                }
+            }
+        }
+        catch (Exception) when (ct.IsCancellationRequested || forwardingFailure.Task.IsCompleted)
+        {
+            // Killing the child while cancelling can close its pipes while this pump drains them.
+        }
+        catch (Exception exception)
+        {
+            forwardingFailure.TrySetResult(exception);
         }
     }
 

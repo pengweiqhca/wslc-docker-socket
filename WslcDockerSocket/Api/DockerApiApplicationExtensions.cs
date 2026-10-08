@@ -180,10 +180,7 @@ internal static partial class DockerApiApplicationExtensions
                 return Results.StatusCode(StatusCodes.Status204NoContent);
             });
 
-        // WSLC exposes no event source, so Docker's event stream cannot be backed by real state transitions.
-        app.MapGet("/events",
-            () => DockerResults.Error(StatusCodes.Status501NotImplemented,
-                "Event streaming is not supported by the WSLC Docker socket because WSLC provides no event source."));
+        app.MapGet("/events", WriteEventsAsync);
 
         app.MapGet("/volumes",
             async (HttpContext context, WslcDockerEngine engine, CancellationToken ct) =>
@@ -303,6 +300,26 @@ internal static partial class DockerApiApplicationExtensions
         CancellationToken ct) => await DockerStreams
         .WriteFramesAsync(context.Response, await engine.StartExecAsync(id, ct).ConfigureAwait(false), ct)
         .ConfigureAwait(false);
+
+    /// <summary>
+    /// Unlike logs/exec, events are plain JSON lines with no Docker stream-multiplex framing, so this writes
+    /// directly to the response body instead of going through <see cref="DockerStreams"/>.
+    /// </summary>
+    private static async Task WriteEventsAsync(HttpContext context, WslcDockerEngine engine, CancellationToken ct)
+    {
+        // Status code and content type are only set as fields here, matching WriteLogsAsync; nothing is sent to
+        // the client until the first event's flush below, so an invalid "until"/filters query still surfaces as
+        // a normal 501 through the exception middleware instead of a response that already claims 200.
+        context.Response.StatusCode = StatusCodes.Status200OK;
+        context.Response.ContentType = "application/json";
+        await engine.StreamEventsAsync(context.Request.Query, async (dockerEvent, cancellationToken) =>
+        {
+            await JsonSerializer.SerializeAsync(context.Response.Body, dockerEvent, DockerJson.Options, cancellationToken)
+                .ConfigureAwait(false);
+            await context.Response.WriteAsync("\n", cancellationToken).ConfigureAwait(false);
+            await context.Response.Body.FlushAsync(cancellationToken).ConfigureAwait(false);
+        }, ct).ConfigureAwait(false);
+    }
 
     [LoggerMessage(LogLevel.Error, "Docker API request {Method} {Path} failed.")]
     static partial void LogDockerApiRequestFailed(this ILogger logger, string method, string path,

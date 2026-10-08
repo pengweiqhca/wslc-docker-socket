@@ -162,13 +162,23 @@ public sealed class DockerApiContractTest(IHttpClientFactory factory)
     }
 
     [Fact]
-    public async Task EventStreamReportsThatWslcHasNoEventSourceInsteadOfAnUnknownEndpoint()
+    public async Task EventStreamWithUntilReportsThatWslcCannotBoundTheStream()
     {
         var ct = TestContext.Current.CancellationToken;
-        using var response = await _client.GetAsync("/v1.54/events", ct);
+        using var response = await _client.GetAsync("/v1.54/events?until=1700000000", ct);
 
         Assert.Equal(HttpStatusCode.NotImplemented, response.StatusCode);
-        await AssertDockerErrorAsync(response, "Event streaming is not supported", ct);
+        await AssertDockerErrorAsync(response, "'until'", ct);
+    }
+
+    [Fact]
+    public async Task EventStreamWithAnUnsupportedFilterFailsFastInsteadOfSilentlyIgnoringIt()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var response = await _client.GetAsync("""/v1.54/events?filters={"label":["foo=bar"]}""", ct);
+
+        Assert.Equal(HttpStatusCode.NotImplemented, response.StatusCode);
+        await AssertDockerErrorAsync(response, "'label' filter", ct);
     }
 
     [Fact]

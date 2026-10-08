@@ -635,6 +635,142 @@ public sealed class WslcCliDefaultScopeTest
     }
 
     [Fact]
+    public async Task EventsUsesVerifiedUnqualifiedCliVectorWithSinceAndFilters()
+    {
+        var runner = new RecordingRunner(
+            new WslcCommandResult(string.Empty, string.Empty, 0),
+            streamLinesAsync: (command, writeLineAsync, ct) =>
+            {
+                Assert.Equal(
+                    ["events", "--since", "1700000000", "--filter", "event=start", "--filter", "type=container"],
+                    command);
+                return Task.CompletedTask;
+            });
+        using var engine = new WslcDockerEngine(runner, new WslRuntimeDiagnosticsProvider());
+        var query = new QueryCollection(new Dictionary<string, StringValues>
+        {
+            ["since"] = "1700000000",
+            ["filters"] = """{"type":["container"],"event":["start"]}""",
+        });
+
+        await engine.StreamEventsAsync(query, (_, _) => ValueTask.CompletedTask, TestContext.Current.CancellationToken);
+
+        AssertDefaultScope(runner);
+    }
+
+    [Fact]
+    public async Task EventsParsesWslcTextLinesIntoDockerShapedEvents()
+    {
+        var runner = new RecordingRunner(
+            new WslcCommandResult(string.Empty, string.Empty, 0),
+            streamLinesAsync: async (_, writeLineAsync, ct) =>
+            {
+                await writeLineAsync(
+                    "2026-10-08T10:31:08.000000000+08:00 container start 4788142ddfcca2aea6b4e95ce5d588fa34d60d14e3b65237c5bcf69771d97a4f (image=mysql, name=mysql)",
+                    ct);
+            });
+        using var engine = new WslcDockerEngine(runner, new WslRuntimeDiagnosticsProvider());
+        var events = new List<object>();
+
+        await engine.StreamEventsAsync(new QueryCollection(), (dockerEvent, _) =>
+        {
+            events.Add(dockerEvent);
+            return ValueTask.CompletedTask;
+        }, TestContext.Current.CancellationToken);
+
+        var dockerEvent = JsonSerializer.SerializeToElement(Assert.Single(events));
+        Assert.Equal("container", dockerEvent.GetProperty("Type").GetString());
+        Assert.Equal("start", dockerEvent.GetProperty("Action").GetString());
+        Assert.Equal("4788142ddfcca2aea6b4e95ce5d588fa34d60d14e3b65237c5bcf69771d97a4f", dockerEvent.GetProperty("Actor").GetProperty("ID").GetString());
+        Assert.Equal("mysql", dockerEvent.GetProperty("Actor").GetProperty("Attributes").GetProperty("image").GetString());
+        Assert.Equal("mysql", dockerEvent.GetProperty("Actor").GetProperty("Attributes").GetProperty("name").GetString());
+        Assert.Equal("start", dockerEvent.GetProperty("status").GetString());
+        Assert.Equal("mysql", dockerEvent.GetProperty("from").GetString());
+        Assert.True(dockerEvent.GetProperty("time").GetInt64() > 0);
+        Assert.True(dockerEvent.GetProperty("timeNano").GetInt64() > 0);
+    }
+
+    [Fact]
+    public async Task EventsSkipsALineItCannotParseInsteadOfFailingTheWholeStream()
+    {
+        var runner = new RecordingRunner(
+            new WslcCommandResult(string.Empty, string.Empty, 0),
+            streamLinesAsync: async (_, writeLineAsync, ct) =>
+            {
+                await writeLineAsync("not a recognizable event line", ct);
+                await writeLineAsync(
+                    "2026-10-08T10:31:08.000000000+08:00 container start abc123 (image=mysql, name=mysql)",
+                    ct);
+            });
+        using var engine = new WslcDockerEngine(runner, new WslRuntimeDiagnosticsProvider());
+        var events = new List<object>();
+
+        await engine.StreamEventsAsync(new QueryCollection(), (dockerEvent, _) =>
+        {
+            events.Add(dockerEvent);
+            return ValueTask.CompletedTask;
+        }, TestContext.Current.CancellationToken);
+
+        Assert.Single(events);
+    }
+
+    [Fact]
+    public async Task EventsRejectsAnUnsupportedFilterBeforeRunningAnyCliCommand()
+    {
+        var runner = new RecordingRunner(new WslcCommandResult(string.Empty, string.Empty, 0));
+        using var engine = new WslcDockerEngine(runner, new WslRuntimeDiagnosticsProvider());
+        var query = new QueryCollection(new Dictionary<string, StringValues>
+        {
+            ["filters"] = """{"label":["foo=bar"]}""",
+        });
+
+        var exception = await Assert.ThrowsAsync<DockerApiException>(() => engine.StreamEventsAsync(query,
+            (_, _) => ValueTask.CompletedTask, TestContext.Current.CancellationToken));
+
+        Assert.Equal(StatusCodes.Status501NotImplemented, exception.StatusCode);
+        Assert.Empty(runner.Commands);
+    }
+
+    [Fact]
+    public async Task EventsRejectsUntilBeforeRunningAnyCliCommand()
+    {
+        var runner = new RecordingRunner(new WslcCommandResult(string.Empty, string.Empty, 0));
+        using var engine = new WslcDockerEngine(runner, new WslRuntimeDiagnosticsProvider());
+        var query = new QueryCollection(new Dictionary<string, StringValues> { ["until"] = "1700000000" });
+
+        var exception = await Assert.ThrowsAsync<DockerApiException>(() => engine.StreamEventsAsync(query,
+            (_, _) => ValueTask.CompletedTask, TestContext.Current.CancellationToken));
+
+        Assert.Equal(StatusCodes.Status501NotImplemented, exception.StatusCode);
+        Assert.Contains("until", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(runner.Commands);
+    }
+
+    [Fact]
+    public void EventLineParsesRfc3339TimestampTypeActionIdAndAttributes()
+    {
+        var parsed = WslcEventLine.TryParse(
+            "2026-10-08T10:34:50.000000000+08:00 network create 4900cb16064f9e2ec5429836dd94f423b59340bc2e33c440a9ebb4bf1ba1f4ab (name=probe-events-net, type=bridge)",
+            out var line);
+
+        Assert.True(parsed);
+        Assert.Equal("network", line.Type);
+        Assert.Equal("create", line.Action);
+        Assert.Equal("4900cb16064f9e2ec5429836dd94f423b59340bc2e33c440a9ebb4bf1ba1f4ab", line.ActorId);
+        Assert.Equal("probe-events-net", line.Attributes["name"]);
+        Assert.Equal("bridge", line.Attributes["type"]);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("not a recognizable event line")]
+    [InlineData("not-a-timestamp network create abc123")]
+    [InlineData("2026-10-08T10:34:50.000000000+08:00 network create abc123 (malformed-attribute)")]
+    public void EventLineRejectsUnrecognizedShapesInsteadOfThrowing(string line) =>
+        Assert.False(WslcEventLine.TryParse(line, out _));
+
+    [Fact]
     public async Task ImageCatalogUsesUnqualifiedListAndInspect()
     {
         var runner = new RecordingRunner(command => command.SequenceEqual(["image", "list", "--format", "json"])
@@ -796,10 +932,17 @@ public sealed class WslcCliDefaultScopeTest
 
     private sealed class RecordingRunner(
         Func<IReadOnlyList<string>, WslcCommandResult> resultFactory,
-        Func<IReadOnlyList<string>, Func<DockerOutputFrame, CancellationToken, ValueTask>, CancellationToken, Task> streamAsync)
+        Func<IReadOnlyList<string>, Func<DockerOutputFrame, CancellationToken, ValueTask>, CancellationToken, Task> streamAsync,
+        Func<IReadOnlyList<string>, Func<string, CancellationToken, ValueTask>, CancellationToken, Task>? streamLinesAsync = null)
         : IWslcCommandRunner
     {
         public RecordingRunner(WslcCommandResult result) : this(_ => result)
+        {
+        }
+
+        public RecordingRunner(WslcCommandResult result,
+            Func<IReadOnlyList<string>, Func<string, CancellationToken, ValueTask>, CancellationToken, Task> streamLinesAsync)
+            : this(_ => result, (_, _, _) => Task.CompletedTask, streamLinesAsync)
         {
         }
 
@@ -833,6 +976,15 @@ public sealed class WslcCliDefaultScopeTest
         {
             Commands.Add([.. command]);
             return streamAsync(command, writeFrameAsync, ct);
+        }
+
+        public Task StreamLinesAsync(IReadOnlyList<string> command,
+            Func<string, CancellationToken, ValueTask> writeLineAsync, CancellationToken ct)
+        {
+            Commands.Add([.. command]);
+            return streamLinesAsync is null
+                ? Task.CompletedTask
+                : streamLinesAsync(command, writeLineAsync, ct);
         }
     }
 }

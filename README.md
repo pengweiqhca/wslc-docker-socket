@@ -50,6 +50,7 @@ dotnet run --project WslcDockerSocket/WslcDockerSocket.csproj --configuration Re
 - **Docker-shaped listings.** `/containers/json` reports published ports and the container's bridge IP, so UIs like Portainer populate those columns.
 - **Automatic host ports.** A client asking for an ephemeral published port gets a real free port allocated for it.
 - **Live WSLC state.** Volumes, networks, containers, and images are read from WSLC on demand; nothing is cached or invented.
+- **Event stream.** `GET /events` forwards real container and network lifecycle events from `wslc events`.
 - **OpenAPI document** at `/swagger/v1/swagger.json`, with Swagger UI enabled.
 - **Honest failures** for anything WSLC cannot back.
 
@@ -107,7 +108,7 @@ Available on both unversioned and `/v{major}.{minor}` paths:
 
 | Area | Endpoints |
 | --- | --- |
-| System | `GET/HEAD /_ping`, `GET /version`, `GET /info` |
+| System | `GET/HEAD /_ping`, `GET /version`, `GET /info`, `GET /events` |
 | Images | `GET /images/json`, `GET /images/{name}/json`, `POST /images/create` |
 | Containers | `POST /containers/create`, `.../start`, `.../stop`, `.../restart`, `.../wait`, `GET /containers/json`, `GET /containers/{id}/json`, `GET /containers/{id}/logs`, `PUT /containers/{id}/archive`, `DELETE /containers/{id}` |
 | Exec | `POST /containers/{id}/exec`, `POST /exec/{id}/start`, `GET /exec/{id}/json` |
@@ -124,7 +125,8 @@ These return a Docker-style `501 Not Implemented` with the reason in the message
 
 | Request | Why it cannot be mapped |
 | --- | --- |
-| `GET /events` | WSLC has no event source at all: no `events` command and no change notifications. |
+| `GET /events` with an `until` query parameter | `wslc events --until` does not stop the stream at that time (confirmed: it keeps tailing live events well past it), so a bounded request cannot be honoured faithfully. Without `until` the stream is unbounded, which `wslc events` does support. |
+| `GET /events` with a `label` filter | `wslc events --filter label=...` itself rejects that key with `E_INVALIDARG`; `container`, `event`, `image`, `network`, and `type` are supported. |
 | `POST /containers/{id}/resize`, `POST /exec/{id}/resize` | There is no TTY to resize — TTY containers are rejected at create and execs run without one. |
 | `GET /images/{name}/history` | WSLC reports no per-layer build history. Inspect exposes only layer digests, without the per-layer command, size, or timestamp Docker's response requires. |
 | Bind, volume, and tmpfs mounts | Mount semantics are not mapped. |
@@ -185,6 +187,8 @@ Note that a logon task only helps after logon. An adapter started as a service a
 
 **User-defined networks.** WSLC 3.0 added real `network create`/`connect`/`disconnect` commands, so these are no longer limited to the default bridge network. `POST /networks/create` maps `Driver`, `Internal`, and the first `IPAM.Config` entry's `Subnet`/`Gateway`/`IPRange` onto `wslc network create`'s matching flags. A container can join exactly one additional network at creation time, through either `HostConfig.NetworkMode` (just the name) or `NetworkingConfig.EndpointsConfig` (name plus its `IPAMConfig.IPv4Address` and `Aliases`), both translating to `--network`/`--ip`/`--network-alias` on `container create`. `POST /networks/{id}/connect` and `.../disconnect` map onto the equivalent `wslc network connect`/`disconnect` commands after resolving the network and container by id or name.
 
+**Events.** `GET /events` forwards `wslc events`, which WSLC 3.0 also added. Its text lines (`<RFC3339 timestamp> <type> <action> <id> (<key>=<value>, ...)`) are parsed and reshaped into Docker's JSON-lines event format, with both the canonical `Type`/`Action`/`Actor` fields and the legacy `status`/`id`/`from` fields clients may still read. Docker's `since` query parameter is passed straight through to `--since`, since wslc accepts the same Unix-epoch-or-RFC3339 forms Docker's clients send; `filters` becomes repeated `--filter key=value` flags for the keys wslc itself understands (`container`, `event`, `image`, `network`, `type`). `until` is rejected with `501` rather than silently serving an unbounded stream — see the compatibility limits above for why.
+
 ---
 
 ## Build and test
@@ -216,7 +220,7 @@ Because the tests bind a named pipe, an interrupted run can leave a host process
 - Intended for local development and experimentation.
 - The adapter authenticates nothing. Anyone able to reach the pipe or the TCP port has full control over WSLC containers, including creating new ones.
 - Docker API coverage is partial by design; see the limits above.
-- Client UIs will show gaps for data WSLC does not expose. Compose/stack grouping and label-driven views are empty because container labels are not yet reported in listings, and views that rely on `/events` do not refresh automatically.
+- Client UIs will show gaps for data WSLC does not expose. Compose/stack grouping and label-driven views are empty because container labels are not yet reported in listings, and `/events` carries no image-level or volume-level events (WSLC only emits container and network events).
 
 ---
 

@@ -464,6 +464,74 @@ internal sealed class WslcDockerEngine : IDisposable
         await _commandRunner.StreamAsync(["container", "logs", "--follow", container.Id], writeFrameAsync, ct).ConfigureAwait(false);
     }
 
+    private static readonly string[] SupportedEventFilterNames = ["container", "event", "image", "network", "type"];
+
+    public async Task StreamEventsAsync(IQueryCollection query, Func<object, CancellationToken, ValueTask> writeEventAsync, CancellationToken ct)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(writeEventAsync);
+        // Validated and the command built before any streaming starts: throwing here, before the first await,
+        // surfaces as a normal exception out of this async method rather than mid-stream, so the HTTP handler's
+        // response hasn't started yet and the exception middleware can still set the correct status code.
+        var command = BuildEventsCommand(query);
+
+        await _commandRunner.StreamLinesAsync(command, async (line, cancellationToken) =>
+        {
+            if (WslcEventLine.TryParse(line, out var parsed))
+            {
+                await writeEventAsync(ToDockerEvent(parsed), cancellationToken).ConfigureAwait(false);
+            }
+        }, ct).ConfigureAwait(false);
+    }
+
+    private static List<string> BuildEventsCommand(IQueryCollection query)
+    {
+        // wslc's --until keeps the stream open past that point instead of ending it there like Docker's own
+        // `until` does, so a bounded request cannot be honored faithfully; reporting it unsupported is
+        // preferable to silently serving an unbounded stream the client didn't ask for.
+        if (!string.IsNullOrWhiteSpace(query["until"].ToString()))
+        {
+            throw new DockerApiException(StatusCodes.Status501NotImplemented,
+                "The 'until' query parameter is not supported by the WSLC Docker socket because 'wslc events --until' does not stop the stream at that time.");
+        }
+
+        var filters = DockerFilters.FromQuery(query, SupportedEventFilterNames);
+        var command = new List<string> { "events" };
+        var since = query["since"].ToString();
+        if (!string.IsNullOrWhiteSpace(since))
+        {
+            command.AddRange(["--since", since]);
+        }
+
+        foreach (var name in SupportedEventFilterNames)
+        {
+            foreach (var value in filters.Values(name))
+            {
+                command.AddRange(["--filter", $"{name}={value}"]);
+            }
+        }
+
+        return command;
+    }
+
+    /// <summary>
+    /// Projects a parsed wslc event line onto Docker's event shape. The legacy top-level <c>status</c>/<c>id</c>/
+    /// <c>from</c> fields are included alongside the canonical <c>Type</c>/<c>Action</c>/<c>Actor</c> ones for
+    /// clients that still read the older shape.
+    /// </summary>
+    private static object ToDockerEvent(WslcEventLine parsed) => new
+    {
+        status = parsed.Action,
+        id = parsed.ActorId,
+        from = parsed.Attributes.TryGetValue("image", out var image) ? image : null,
+        Type = parsed.Type,
+        Action = parsed.Action,
+        Actor = new { ID = parsed.ActorId, Attributes = parsed.Attributes },
+        scope = "local",
+        time = parsed.Time.ToUnixTimeSeconds(),
+        timeNano = parsed.UnixTimeNanoseconds,
+    };
+
     public async Task<IReadOnlyList<DockerOutputFrame>> GetLogsAsync(string id, bool follow, CancellationToken ct)
     {
         var container = await _containerCatalog.ResolveAsync(id, ct).ConfigureAwait(false);
