@@ -1,5 +1,9 @@
+using System.IO.Pipes;
 using System.Net;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.AspNetCore.Server.Kestrel.Transport.NamedPipes;
 using Microsoft.Extensions.Options;
 #if DEBUG
 using Microsoft.OpenApi;
@@ -43,8 +47,6 @@ builder.Services.AddSingleton<IConfigureOptions<KestrelServerOptions>>(provider 
             if (!socketOptions.DisableNamedPipe) options.ListenNamedPipe(socketOptions.NamedPipe, Configure);
         }));
 
-/*builder.Host.UseWindowsService(options => options.ServiceName = "wslc-docker-socket");
-
 builder.Services.PostConfigure<NamedPipeTransportOptions>(options =>
 {
     if (socketOptions.DisableNamedPipe || !OperatingSystem.IsWindows()) return;
@@ -59,7 +61,7 @@ builder.Services.PostConfigure<NamedPipeTransportOptions>(options =>
         AccessControlType.Allow));
 
     options.PipeSecurity = security;
-});*/
+});
 
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
